@@ -1,0 +1,674 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LonesomeTheBlue
+
+//@version=6
+indicator('自作インジケーター', overlay = true, max_bars_back = 500, max_lines_count = 300)
+prd = input.int(defval = 15, title = 'ZigZag Period', minval = 2, maxval = 500)
+showzigzag = input(defval = true, title = 'Show Zig Zag')
+showfibo = input(defval = true, title = 'Show Fibonacci Ratios')
+labelcol = input(defval = color.blue, title = 'Text Color for Fibo Levels')
+fibolinecol = input(defval = color.lime, title = 'Line Color for Fibo Levels')
+upcol = input.color(defval = color.lime, title = 'Zigzag Colors', inline = 'zzcol')
+dncol = input.color(defval = color.red, title = '', inline = 'zzcol')
+labelloc = input.string(defval = 'Left', title = 'Label Location', options = ['Left', 'Right'])
+
+// ラベル背景設定: 背景表示のオン/オフと色の選択（デフォルトは fibolinecol を使う）
+label_bg_enable = input.bool(defval = true, title = 'Show label background?')
+label_bg_use_fibolinecol = input.bool(defval = true, title = 'Use fibo line color for label background?')
+label_bg_color = input.color(defval = color.lime, title = 'Label background color (when not using fibo color)')
+// ラベル位置（チャート端からのオフセット） — 上で参照するためここで宣言
+label_position = input.int(title = 'Label Position', defval = 10, minval = 0, maxval = 50, tooltip = 'When increasing number, labels move right')
+enable236 = input(defval = true, title = 'Enable Level 0.236')
+enable382 = input(defval = true, title = 'Enable Level 0.382')
+enable500 = input(defval = true, title = 'Enable Level 0.500')
+enable618 = input(defval = true, title = 'Enable Level 0.618')
+enable786 = input(defval = true, title = 'Enable Level 0.786')
+
+// フィボナッチの基準時間足（短い足で見たときにここを基準にフィボを表示する）
+fibo_base_tf = input.timeframe(title = 'Fibonacci base timeframe', defval = '240')
+
+var fibo_ratios = array.new_float(1)
+var shownlevels = 1
+if barstate.isfirst
+    array.push(fibo_ratios, 0.000)
+    if enable236
+        array.push(fibo_ratios, 0.236)
+        shownlevels := shownlevels + 1
+        shownlevels
+    if enable382
+        array.push(fibo_ratios, 0.382)
+        shownlevels := shownlevels + 1
+        shownlevels
+    if enable500
+        array.push(fibo_ratios, 0.500)
+        shownlevels := shownlevels + 1
+        shownlevels
+    if enable618
+        array.push(fibo_ratios, 0.618)
+        shownlevels := shownlevels + 1
+        shownlevels
+    if enable786
+        array.push(fibo_ratios, 0.786)
+        shownlevels := shownlevels + 1
+        shownlevels
+    for x = 1 to 5 by 1
+        array.push(fibo_ratios, x)
+        array.push(fibo_ratios, x + 0.272)
+        array.push(fibo_ratios, x + 0.414)
+        array.push(fibo_ratios, x + 0.618)
+
+// --- Utility: 安全な配列取得と描画制限 -------------------------------------------------
+// arr から idx を安全に取得。範囲外なら na を返す。
+get_safe(arr, idx) =>
+    idx >= 0 and idx < array.size(arr) ? array.get(arr, idx) : na
+
+// fibo ラインの上限（TradingView のオブジェクト制限を避けるため）
+max_fibo_lines = 40
+// -------------------------------------------------------------------------------------
+
+// フィボナッチを短い足で表示する際に高時間足を基準にするか（intraday 時に有効）
+fibo_use_base_on_intraday = input.bool(true, title = 'Use Fibonacci base timeframe on intraday charts?')
+
+float ph = ta.highestbars(high, prd) == 0 ? high : na
+float pl = ta.lowestbars(low, prd) == 0 ? low : na
+var dir = 0
+iff_1 = bool(pl) and na(ph) ? -1 : dir
+dir := bool(ph) and na(pl) ? 1 : iff_1
+var max_array_size = 10
+var zigzag = array.new_float(0)
+oldzigzag = array.copy(zigzag)
+
+add_to_zigzag(value, bindex) =>
+    array.unshift(zigzag, bindex)
+    array.unshift(zigzag, value)
+    if array.size(zigzag) > max_array_size
+        array.pop(zigzag)
+        array.pop(zigzag)
+
+update_zigzag(value, bindex) =>
+    if array.size(zigzag) == 0
+        add_to_zigzag(value, bindex)
+    else
+        if dir == 1 and value > array.get(zigzag, 0) or dir == -1 and value < array.get(zigzag, 0)
+            array.set(zigzag, 0, value)
+            array.set(zigzag, 1, bindex)
+        0.
+
+bool dirchanged = dir != dir[1]
+if bool(ph) or bool(pl)
+    if dirchanged
+        add_to_zigzag(dir == 1 ? ph : pl, bar_index)
+    else
+        update_zigzag(dir == 1 ? ph : pl, bar_index)
+
+if showzigzag and array.size(zigzag) >= 4 and array.size(oldzigzag) >= 4
+    var line zzline = na
+    if array.get(zigzag, 0) != array.get(oldzigzag, 0) or array.get(zigzag, 1) != array.get(oldzigzag, 1)
+        if array.get(zigzag, 2) == array.get(oldzigzag, 2) and array.get(zigzag, 3) == math.round(array.get(oldzigzag, 3))
+            line.delete(zzline)
+        zzline := line.new(x1 = math.round(array.get(zigzag, 1)), y1 = array.get(zigzag, 0), x2 = math.round(array.get(zigzag, 3)), y2 = array.get(zigzag, 2), color = dir == 1 ? upcol : dncol, width = 2)
+        zzline
+
+var fibolines = array.new_line(0)
+var fibolabels = array.new_label(0)
+if showfibo and array.size(zigzag) >= 6 and barstate.islast
+    if array.size(fibolines) > 0
+        for x = 0 to array.size(fibolines) - 1 by 1
+            line.delete(array.get(fibolines, x))
+            label.delete(array.get(fibolabels, x))
+
+    // 安全に zigzag の値を取得
+    z0 = get_safe(zigzag, 0)
+    z2 = get_safe(zigzag, 2)
+    z4 = get_safe(zigzag, 4)
+    z5 = get_safe(zigzag, 5)
+
+    // オプション: 短い時間足で表示している場合、別の高時間足をフィボ基準に使う
+    // 注意: ta.highest / ta.lowest は一貫性のため毎計算で呼び出す必要があるため
+    // request.security の呼び出しは条件分岐の外で行い、結果を条件的に適用する。
+    base_high = request.security(syminfo.tickerid, fibo_base_tf, ta.highest(high, prd), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+    base_low = request.security(syminfo.tickerid, fibo_base_tf, ta.lowest(low, prd), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+    // 高時間足の基準バー位置（大まかな描画開始 x 値）
+    base_anchor = request.security(syminfo.tickerid, fibo_base_tf, bar_index, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+    use_fibo_base = fibo_use_base_on_intraday and timeframe.isintraday and (timeframe.period != fibo_base_tf)
+    if use_fibo_base
+        // 取得できたら置き換える（na の場合は元の値を使う）
+        z2 := na(base_low) ? z2 : base_low
+        z4 := na(base_high) ? z4 : base_high
+        z5 := na(base_anchor) ? z5 : base_anchor
+        // z0 は停止判定用。高時間足の最新高値/安値で代替
+        z0 := na(base_high) ? z0 : base_high
+
+    diff = na(z4) or na(z2) ? na : z4 - z2
+    stopit = false
+    for x = 0 to array.size(fibo_ratios) - 1 by 1
+        if stopit and x > shownlevels
+            break
+        // fibo ライン数が上限に達したら古いものを削除しておく
+        while array.size(fibolines) >= max_fibo_lines
+            line.delete(array.get(fibolines, array.size(fibolines) - 1))
+            array.pop(fibolines)
+        // 値を計算（na ガード）
+        y_val = na(diff) ? na : z2 + diff * array.get(fibo_ratios, x)
+
+        // y_val が有効なときのみ線とラベルを作成する
+        if not na(y_val)
+            // ライン作成
+            array.unshift(fibolines, line.new(x1 = math.round(z5), y1 = y_val, x2 = bar_index, y2 = y_val, color = fibolinecol, extend = extend.right))
+
+            // ラベル位置とスタイル（Left/Right に応じる）
+            // 右側ラベルはチャート末尾からの距離を小さく（以前の約半分）して目立ちすぎないようにする
+            right_offset = math.max(2, math.round(label_position / 2))
+            label_x_loc = labelloc == 'Left' ? math.round(z5) - 1 : bar_index + right_offset
+            label_style = labelloc == 'Left' ? label.style_label_left : label.style_label_right
+
+            // ラベルテキスト：パーセンテージ表示（例: 23.6%）と価格を表示
+            ratio_val = array.get(fibo_ratios, x)
+            pct = na(ratio_val) ? na : ratio_val * 100.0
+            label_text = (na(pct) ? '' : str.tostring(pct, '#.##') + '%') + ' (' + str.tostring(math.round_to_mintick(y_val)) + ')'
+
+            // ラベル背景の有無と色を入力で制御
+            label_bg_col = label_bg_use_fibolinecol ? color.new(fibolinecol, 0) : color.new(label_bg_color, 0)
+            if label_bg_enable
+                array.unshift(fibolabels, label.new(x = label_x_loc, y = y_val, text = label_text, color = label_bg_col, textcolor = labelcol, style = label_style))
+            else
+                // 背景なしスタイルでテキスト色のみ表示
+                array.unshift(fibolabels, label.new(x = label_x_loc, y = y_val, text = label_text, textcolor = labelcol, style = label.style_none))
+
+        // 停止条件（線が基準を越えたらそれ以上描画しない）
+        if not na(y_val) and (dir == 1 and y_val > z0 or dir == -1 and y_val < z0)
+            stopit := true
+            stopit
+
+//study("Supertrend", overlay = true, format=format.price, precision=2, resolution="")
+
+Periods = input(title = 'ATR Period', defval = 9)
+src = input(hl2, title = 'Source')
+Multiplier = input.float(title = 'ATR Multiplier', step = 0.1, defval = 3.9)
+changeATR = input(title = 'Change ATR Calculation Method ?', defval = true)
+showsignals = input(title = 'Show Buy/Sell Signals ?', defval = true)
+highlighting = input(title = 'Highlighter On/Off ?', defval = true)
+atr2 = ta.sma(ta.tr, Periods)
+atr = changeATR ? ta.atr(Periods) : atr2
+up = src - Multiplier * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = src + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+upPlot = plot(trend == 1 ? up : na, title = 'Up Trend', style = plot.style_linebr, linewidth = 2, color = color.new(color.green, 0))
+buySignal = trend == 1 and trend[1] == -1
+plotshape(buySignal ? up : na, title = 'UpTrend Begins', location = location.absolute, style = shape.circle, size = size.tiny, color = color.new(color.green, 0))
+plotshape(buySignal and showsignals ? up : na, title = 'Buy', text = 'Buy', location = location.absolute, style = shape.labelup, size = size.tiny, color = color.new(color.green, 0), textcolor = color.new(color.white, 0))
+dnPlot = plot(trend == 1 ? na : dn, title = 'Down Trend', style = plot.style_linebr, linewidth = 2, color = color.new(color.red, 0))
+sellSignal = trend == -1 and trend[1] == 1
+plotshape(sellSignal ? dn : na, title = 'DownTrend Begins', location = location.absolute, style = shape.circle, size = size.tiny, color = color.new(color.red, 0))
+plotshape(sellSignal and showsignals ? dn : na, title = 'Sell', text = 'Sell', location = location.absolute, style = shape.labeldown, size = size.tiny, color = color.new(color.red, 0), textcolor = color.new(color.white, 0))
+mPlot = plot(ohlc4, title = '', style = plot.style_circles, linewidth = math.max(1, 0))
+longFillColor = highlighting ? trend == 1 ? color.green : color.white : color.white
+shortFillColor = highlighting ? trend == -1 ? color.red : color.white : color.white
+// fill(mPlot, upPlot, title = 'UpTrend Highligter', color = longFillColor)
+// fill(mPlot, dnPlot, title = 'DownTrend Highligter', color = shortFillColor)
+alertcondition(buySignal, title = 'SuperTrend Buy', message = 'SuperTrend Buy!')
+alertcondition(sellSignal, title = 'SuperTrend Sell', message = 'SuperTrend Sell!')
+changeCond = trend != trend[1]
+alertcondition(changeCond, title = 'SuperTrend Direction Change', message = 'SuperTrend has changed direction!')
+
+
+//
+
+
+//————————————————————————————————————————————————————————————————————————————————
+// Author | © Dziwne — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — —
+//————————————————————————————————————————————————————————————————————————————————
+// Changelog — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — —
+//
+// 2021.04.15 >  A-V1.0 -First publish
+// 2021.05.05 >  A-V2.0 -Added high and low calculation and display
+// 						-Minor script optimisation
+// 2021.05.06 >  A-V2.1 -Added resolution customisation in the study
+// 2021.10.18 >  A-V2.2 -Added "MA Type" customisation possibility
+// 						-Replaced the "colour schemes" feature by a "base color inputs" feature (user friendly, easy to customise)
+// 						-Switched the title names to English for a better understanding
+// 						-Minor script optimisation
+//————————————————————————————————————————————————————————————————————————————————
+// Related links — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — — —
+//
+// A-V1 : https://fr.tradingview.com/script/IHObMw67-Dziwne-Trend-Indicator-A-EMA-Heikin-Ashi-cloud/
+// A-V2 : https://fr.tradingview.com/script/DTDQ3y76/
+//————————————————————————————————————————————————————————————————————————————————
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//————————————————————————————————————————————————————————————————————————————————
+
+
+
+//————————————————————————————————————————————————————————————————————————————————
+// I.1. Settings, Input — — — — — — — — — — — — — — — — — — — — — — — — — — — — — 
+//————————————————————————————————————————————————————————————————————————————————
+
+//study(title="Trend Indicator A-V2.2 [Dziwne]", shorttitle="Trend Indicator A-V2.2 [Dziwne]", resolution="", overlay=true)
+
+ma_type = input.string(title = 'MA Type', defval = 'VWMA', options = ['EMA', 'SMA', 'SWMA', 'VWMA', 'WMA'])
+ma_period = input.int(title = 'MA Period (Length)', defval = 7, minval = 1)
+ma_period_smoothing = input.int(title = 'MA Period smoothing (Length)', defval = 7, minval = 1)
+
+color_positive = input(title = 'Positive color (Bullish)', defval = color.new(#26A69A, 50))
+color_negative = input(title = 'Negative color (Bearish)', defval = color.new(#EF5350, 50))
+color_hl = input(title = 'High & Low cloud color', defval = color.new(#808080, 80))
+
+show_line = input(title = 'Show (lines)', defval = false)
+show_hl_cloud = input(title = 'Show (High & Low cloud)', defval = true)
+show_oc_cloud = input(title = 'Show (Open & Close cloud)', defval = true)
+
+//————————————————————————————————————————————————————————————————————————————————
+// I.2. Settings, Function definition — — — — — — — — — — — — — — — — — — — — — — 
+//————————————————————————————————————————————————————————————————————————————————
+
+f_ma_type(input_ma_type, input_source, input_ma_period) =>
+    result = float(na)
+
+    if input_ma_type == 'EMA'
+        result := ta.ema(input_source, input_ma_period)
+        result
+    if input_ma_type == 'SMA'
+        result := ta.sma(input_source, input_ma_period)
+        result
+    if input_ma_type == 'SWMA'
+        result := ta.swma(input_source)
+        result
+    if input_ma_type == 'VWMA'
+        result := ta.vwma(input_source, input_ma_period)
+        result
+    if input_ma_type == 'WMA'
+        result := ta.wma(input_source, input_ma_period)
+        result
+
+    result
+
+//————————————————————————————————————————————————————————————————————————————————
+// II.1. Calculations, MA — — — — — — — — — — — — — — — — — — — — — — — — — — — — 
+//————————————————————————————————————————————————————————————————————————————————
+
+o = f_ma_type(ma_type, open, ma_period)
+c = f_ma_type(ma_type, close, ma_period)
+h = f_ma_type(ma_type, high, ma_period)
+l = f_ma_type(ma_type, low, ma_period)
+
+//————————————————————————————————————————————————————————————————————————————————
+// II.2. Calculations, Heikin Ashi — — — — — — — — — — — — — — — — — — — — — — — — 
+//————————————————————————————————————————————————————————————————————————————————
+
+ha = ticker.heikinashi(syminfo.tickerid)
+
+ha_o = request.security(ha, timeframe.period, o)
+ha_c = request.security(ha, timeframe.period, c)
+ha_h = request.security(ha, timeframe.period, h)
+ha_l = request.security(ha, timeframe.period, l)
+
+//————————————————————————————————————————————————————————————————————————————————
+// II.3. Calculations, MA (Smoothing) — — — — — — — — — — — — — — — — — — — — — — 
+//————————————————————————————————————————————————————————————————————————————————
+
+ha_o_smooth = f_ma_type(ma_type, ha_o, ma_period_smoothing)
+ha_c_smooth = f_ma_type(ma_type, ha_c, ma_period_smoothing)
+ha_h_smooth = f_ma_type(ma_type, ha_h, ma_period_smoothing)
+ha_l_smooth = f_ma_type(ma_type, ha_l, ma_period_smoothing)
+
+//————————————————————————————————————————————————————————————————————————————————
+// III.1. Display, Colors — — — — — — — — — — — — — — — — — — — — — — — — — — — — 
+//————————————————————————————————————————————————————————————————————————————————
+
+trend2 = ha_c_smooth >= ha_o_smooth
+
+color_trend = trend2 ? color_positive : color_negative
+
+color_show_line_positive = show_line ? color_positive : na
+color_show_line_negative = show_line ? color_negative : na
+
+color_show_hl_cloud = show_hl_cloud ? color_hl : na
+color_show_oc_cloud = show_oc_cloud ? color_trend : na
+
+//————————————————————————————————————————————————————————————————————————————————
+// III.2. Display, Plotting & Filling — — — — — — — — — — — — — — — — — — — — — — 
+//————————————————————————————————————————————————————————————————————————————————
+
+o_line = plot(ha_o_smooth, color = color_show_line_positive, title = 'Open line')
+c_line = plot(ha_c_smooth, color = color_show_line_negative, title = 'Close line')
+
+h_line = plot(ha_h_smooth, color = color_show_line_positive, title = 'High line')
+l_line = plot(ha_l_smooth, color = color_show_line_negative, title = 'Low line')
+
+fill(o_line, c_line, color = color_show_oc_cloud, title = 'Open & Close Trendcloud')
+fill(h_line, l_line, color = color_show_hl_cloud, title = 'High & Low Trendcloud')
+
+
+//Users input
+chk_yh = input(title = 'Yesterday\'s High', defval = true)
+chk_yl = input(title = 'Yesterday\'s Low', defval = true)
+chk_th = input(title = 'Today\'s High', defval = true)
+chk_tl = input(title = 'Today\'s Low', defval = true)
+chk_lwh = input(title = 'Last Week\'s High', defval = true)
+chk_lwl = input(title = 'Last Week\'s Low', defval = true)
+chk_lmh = input(title = 'Last Month\'s High', defval = true)
+chk_lml = input(title = 'Last Month\'s Low', defval = true)
+chk_lyh = input(title = 'Last Year\'s High', defval = true)
+chk_lyl = input(title = 'Last Year\'s Low', defval = true)
+bar_num = input(title = 'Number of candles to look back to draw line', defval = 50)
+show_labels = input(title = 'Show Labels?', defval = true)
+size_labels = input.string(title = 'Label font size', defval = size.normal, options = [size.large, size.normal, size.small])
+color_labels = input(title = 'Label font color', defval = color.rgb(255, 255, 255))
+
+
+//Get High&Low Price
+isess = session.regular
+t = ticker.new(syminfo.prefix, syminfo.ticker, session = isess)
+igaps = barmerge.gaps_off
+yesterdayHigh = request.security(t, 'D', high[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+yesterdayLow = request.security(t, 'D', low[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+lastweekHigh = request.security(t, 'W', high[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+lastweekLow = request.security(t, 'W', low[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+lastmonthHigh = request.security(t, 'M', high[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+lastmonthLow = request.security(t, 'M', low[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+lastyearHigh = request.security(t, '12M', high[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+lastyearLow = request.security(t, '12M', low[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+todayHigh = request.security(t, 'D', high[0], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+todayLow = request.security(t, 'D', low[0], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+
+// Plot the other time frame's data
+// --- ラベル用変数（ここで先に宣言しておく）
+var label yes_high_label = na
+var label yes_low_label = na
+var label tod_high_label = na
+var label tod_low_label = na
+var label lweek_high_label = na
+var label lweek_low_label = na
+var label lmonth_high_label = na
+var label lmonth_low_label = na
+var label lyear_high_label = na
+var label lyear_low_label = na
+
+aa = plot(timeframe.isintraday ? chk_yh ? yesterdayHigh : na : na, linewidth = 1, title = 'Yesterday\'s High', color = color.new(color.green, 0), show_last = bar_num)
+bb = plot(timeframe.isintraday ? chk_yl ? yesterdayLow : na : na, linewidth = 1, title = 'Yesterday\'s Low', color = color.new(color.red, 0), show_last = bar_num)
+cc = plot(timeframe.isintraday ? chk_th ? todayHigh : na : na, linewidth = 1, title = 'Today\'s High', color = color.new(color.black, 0), show_last = bar_num)
+dd = plot(timeframe.isintraday ? chk_tl ? todayLow : na : na, linewidth = 1, title = 'Today\'s Low', color = color.new(color.maroon, 0), show_last = bar_num)
+ee = plot(timeframe.isintraday ? chk_lwh ? lastweekHigh : na : timeframe.isdaily ? chk_lwh ? lastweekHigh : na : na, linewidth = 1, title = 'Last Week\'s High', color = color.new(color.navy, 0), show_last = bar_num)
+ff = plot(timeframe.isintraday ? chk_lwl ? lastweekLow : na : timeframe.isdaily ? chk_lwl ? lastweekLow : na : na, linewidth = 1, title = 'Last Week\'s Low', color = color.new(color.orange, 0), show_last = bar_num)
+gg = plot(timeframe.isintraday ? chk_lmh ? lastmonthHigh : na : timeframe.isdaily ? chk_lmh ? lastmonthHigh : na : timeframe.isweekly ? chk_lmh ? lastmonthHigh : na : na, linewidth = 1, title = 'Last Month\'s High', color = color.new(color.purple, 0), show_last = bar_num)
+hh = plot(timeframe.isintraday ? chk_lml ? lastmonthLow : na : timeframe.isdaily ? chk_lml ? lastmonthLow : na : timeframe.isweekly ? chk_lml ? lastmonthLow : na : na, linewidth = 1, title = 'Last Month\'s Low', color = color.new(color.blue, 0), show_last = bar_num)
+ii = plot(timeframe.isintraday ? chk_lyh ? lastyearHigh : na : timeframe.isdaily ? chk_lyh ? lastyearHigh : na : timeframe.isweekly ? chk_lyh ? lastyearHigh : na : na, linewidth = 1, title = 'Last Year\'s High', color = color.new(#AA8855, 0), show_last = bar_num)
+jj = plot(timeframe.isintraday ? chk_lyl ? lastyearLow : na : timeframe.isdaily ? chk_lyl ? lastyearLow : na : timeframe.isweekly ? chk_lyl ? lastyearLow : na : na, linewidth = 1, title = 'Last Year\'s Low', color = color.new(#AA8855, 0), show_last = bar_num)
+
+
+//Draw labels
+if show_labels == true
+    // Yesterday's High
+    if chk_yh == true and timeframe.isintraday == true
+        if not na(yes_high_label)
+            label.delete(yes_high_label)
+        yes_high_label := label.new(bar_index + label_position, yesterdayHigh, 'Yesterday\'s High', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    // Yesterday's Low
+    if chk_yl == true and timeframe.isintraday == true
+        if not na(yes_low_label)
+            label.delete(yes_low_label)
+        yes_low_label := label.new(bar_index + label_position, yesterdayLow, 'Yesterday\'s Low', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    // Today's High
+    if chk_th == true and timeframe.isintraday == true
+        if not na(tod_high_label)
+            label.delete(tod_high_label)
+        tod_high_label := label.new(bar_index + label_position, todayHigh, 'Today\'s High', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    // Today's Low
+    if chk_tl == true and timeframe.isintraday == true
+        if not na(tod_low_label)
+            label.delete(tod_low_label)
+        tod_low_label := label.new(bar_index + label_position, todayLow, 'Today\'s Low', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    if chk_lwh == true and (timeframe.isintraday == true or timeframe.isdaily == true)
+        if not na(lweek_high_label)
+            label.delete(lweek_high_label)
+        lweek_high_label := label.new(bar_index + label_position, lastweekHigh, 'Last Week\'s High', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    if chk_lwl == true and (timeframe.isintraday == true or timeframe.isdaily == true)
+        if not na(lweek_low_label)
+            label.delete(lweek_low_label)
+        lweek_low_label := label.new(bar_index + label_position, lastweekLow, 'Last Week\'s Low', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    if chk_lmh == true and (timeframe.isintraday == true or timeframe.isdaily == true or timeframe.isweekly == true)
+        if not na(lmonth_high_label)
+            label.delete(lmonth_high_label)
+        lmonth_high_label := label.new(bar_index + label_position, lastmonthHigh, 'Last Month\'s High', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    if chk_lml == true and (timeframe.isintraday == true or timeframe.isdaily == true or timeframe.isweekly == true)
+        if not na(lmonth_low_label)
+            label.delete(lmonth_low_label)
+        lmonth_low_label := label.new(bar_index + label_position, lastmonthLow, 'Last Month\'s Low', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    if chk_lyh == true and (timeframe.isintraday == true or timeframe.isdaily == true or timeframe.isweekly == true)
+        if not na(lyear_high_label)
+            label.delete(lyear_high_label)
+        lyear_high_label := label.new(bar_index + label_position, lastyearHigh, 'Last Year\'s High', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+    if chk_lyl == true and (timeframe.isintraday == true or timeframe.isdaily == true or timeframe.isweekly == true)
+        if not na(lyear_low_label)
+            label.delete(lyear_low_label)
+        lyear_low_label := label.new(bar_index + label_position, lastyearLow, 'Last Year\'s Low', style = label.style_none, textcolor = color_labels, size = size_labels, textalign = text.align_right)
+
+//Judge cross over/under with high/low
+//Yesterday's High/Low
+Al_co_yh = ta.crossover(close, yesterdayHigh)
+Al_cu_yl = ta.crossunder(close, yesterdayLow)
+//Today's High/Low
+Al_co_th = ta.crossover(close, todayHigh)
+Al_cu_tl = ta.crossunder(close, todayLow)
+//Last Week's High/Low
+Al_co_lwh = ta.crossover(close, lastweekHigh)
+Al_cu_lwl = ta.crossunder(close, lastweekLow)
+//Last Month's High/Low
+Al_co_lmh = ta.crossover(close, lastmonthHigh)
+Al_cu_lml = ta.crossunder(close, lastmonthLow)
+//Last Year's High/Low
+Al_co_lyh = ta.crossover(close, lastyearHigh)
+Al_cu_lyl = ta.crossunder(close, lastyearLow)
+
+//Alert condition
+alertcondition(Al_co_yh, title = 'Cross over yesterday\'s High', message = 'Price crosses over yesterday\'s High')
+alertcondition(Al_cu_yl, title = 'Cross under yesterday\'s Low', message = 'Price crosses under yesterday\'s Low')
+alertcondition(Al_co_th, title = 'Cross over today\'s High', message = 'Price crosses over today\'s High')
+alertcondition(Al_cu_tl, title = 'Cross under today\'s Low', message = 'Price crosses under today\'s Low')
+alertcondition(Al_co_lwh, title = 'Cross over lastweek\'s High', message = 'Price crosses over last week\'s High')
+alertcondition(Al_cu_lwl, title = 'Cross under lastweek\'s Low', message = 'Price crosses under last week\'s Low')
+alertcondition(Al_co_lmh, title = 'Cross over lastmonth\'s High', message = 'Price crosses over last month\'s High')
+alertcondition(Al_cu_lml, title = 'Cross under lastmonth\'s Low', message = 'Price crosses under last month\'s Low')
+alertcondition(Al_co_lyh, title = 'Cross over lastyear\'s High', message = 'Price crosses over last year\'s High')
+alertcondition(Al_cu_lyl, title = 'Cross under lastyear\'s Low', message = 'Price crosses under last year\'s Low')
+
+
+
+// -------------------------------------------------------------------------------------------------------------------------
+
+//inputs
+SuperBollinger_onoff = input(true, title = 'SuperBollinger ON/OFF', group = 'SuperBollinger')
+
+// SuperBollinger
+length = input(title = 'period', group = 'SuperBollinger', defval = 21)
+
+srcA = input(close, title = 'ソース')
+basis = ta.sma(srcA, length)
+dev = ta.stdev(srcA, length)
+upper1 = basis + dev
+lower1 = basis - dev
+upper2 = basis + dev * 2
+lower2 = basis - dev * 2
+upper3 = basis + dev * 3
+lower3 = basis - dev * 3
+
+
+
+///////////////////////////////////////////////////////////////////
+// cyart
+//barcolor(close < open ? black : white, title="rousoku")
+// #5a4498 Violet
+// #9400d3 = DarkViolet
+
+plot(SuperBollinger_onoff ? basis : na, color = color.new(color.red, 1), title = 'center', linewidth = 3, offset = 1)
+bu1 = plot(SuperBollinger_onoff ? upper1 : na, color = color.new(#388e3c, 1), title = '＋1σ', linewidth = 1, offset = 1)
+bm1 = plot(SuperBollinger_onoff ? lower1 : na, color = color.new(#388e3c, 1), title = '―1σ', linewidth = 1, offset = 1)
+bu2 = plot(SuperBollinger_onoff ? upper2 : na, color = color.new(#f11547, 1), title = '＋2σ', linewidth = 1, offset = 1)
+bm2 = plot(SuperBollinger_onoff ? lower2 : na, color = color.new(#f11547, 1), title = '―2σ', linewidth = 1, offset = 1)
+bu3 = plot(SuperBollinger_onoff ? upper3 : na, color = color.new(#483d8b, 1), title = '＋2σ', linewidth = 2, offset = 1)
+bm3 = plot(SuperBollinger_onoff ? lower3 : na, color = color.new(#483d8b, 1), title = '―2σ', linewidth = 2, offset = 1)
+plot(close, offset = -21 + 1, color = color.new(#ba1dd5, 1), title = 'chikouspan21', linewidth = 1, display = display.none)
+
+// mtf
+// 入力
+onoff_A = input(true, title = 'MA_A ON/OFF', group = 'MTF MA')
+onoff_B = input(true, title = 'MA_B ON/OFF', group = 'MTF MA')
+onoff_C = input(true, title = 'MA_C ON/OFF', group = 'MTF MA')
+onoff_D = input(true, title = 'MA_D ON/OFF', group = 'MTF MA')
+onoff_E = input(true, title = 'MA_E ON/OFF', group = 'MTF MA')
+
+MA_Type = input.string('EMA', '移動平均種類', options = ['EMA', 'SMA'])
+
+period_A = input(title = '期間A', defval = 20)
+period_B = input(title = '期間B', defval = 20)
+period_C = input(title = '期間C', defval = 20)
+period_D = input(title = '期間D', defval = 20)
+period_E = input(title = '期間E', defval = 20)
+
+time_f_A = input.timeframe(title = '時間足4H', defval = '240')
+time_f_B = input.timeframe(title = '時間足1DAY', defval = 'D')
+time_f_C = input.timeframe(title = '時間足1WEEK', defval = 'W')
+time_f_D = input.timeframe(title = '時間足1MONTH', defval = 'M')
+time_f_E = input.timeframe(title = '時間足1H', defval = '60')
+
+src2 = input(close, title = 'ソース')
+
+// 移動平均計算関数
+f_ma(type, _src, _len) =>
+    float result = 0
+    if type == 'SMA'
+        result := ta.sma(_src, _len)
+        result
+    if type == 'EMA'
+        result := ta.ema(_src, _len)
+        result
+    result
+
+// MA計算
+MA_A = request.security(syminfo.tickerid, time_f_A, f_ma(MA_Type, src2, period_A))
+MA_B = request.security(syminfo.tickerid, time_f_B, f_ma(MA_Type, src2, period_B))
+MA_C = request.security(syminfo.tickerid, time_f_C, f_ma(MA_Type, src2, period_C))
+MA_D = request.security(syminfo.tickerid, time_f_D, f_ma(MA_Type, src2, period_D))
+MA_E = request.security(syminfo.tickerid, time_f_E, f_ma(MA_Type, src2, period_E))
+
+ma_offset = input(title = 'Offset', defval = 0)
+
+// プロット
+plot(onoff_A ? MA_A : na, color = color.new(color.green, 0), title = '4時間足', style = plot.style_stepline, linewidth = 2, offset = ma_offset)
+plot(onoff_B ? MA_B : na, color = color.new(#c71585, 0), title = '1日足', style = plot.style_stepline, linewidth = 2, offset = ma_offset)
+plot(onoff_C ? MA_C : na, color = color.new(color.black, 0), title = '週足', style = plot.style_stepline, linewidth = 2, offset = ma_offset)
+plot(onoff_D ? MA_D : na, color = color.new(#00ffff, 0), title = '月足', style = plot.style_stepline, linewidth = 2, offset = ma_offset)
+plot(onoff_E ? MA_E : na, color = color.new(#ff0000, 0), title = '1時間', style = plot.style_line, linewidth = 2, offset = ma_offset)
+
+// ラベル表示用の設定
+label_offset = input.int(20, title = 'ラベルオフセット', minval = 0, group = 'ラベル設定')
+
+// 配列初期化
+ma_values = array.new_float(5, na)
+ma_names = array.new_string(5, '')
+ma_colors = array.new_color(5, na)
+ma_onoff = array.new_bool(5, false)
+
+array.set(ma_values, 0, MA_A)
+array.set(ma_values, 1, MA_B)
+array.set(ma_values, 2, MA_C)
+array.set(ma_values, 3, MA_D)
+array.set(ma_values, 4, MA_E)
+
+array.set(ma_names, 0, '4H MA')
+array.set(ma_names, 1, '1D MA')
+array.set(ma_names, 2, '1W MA')
+array.set(ma_names, 3, '1M MA')
+array.set(ma_names, 4, '1H MA')
+
+array.set(ma_colors, 0, color.green)
+array.set(ma_colors, 1, #c71585)
+array.set(ma_colors, 2, color.black)
+array.set(ma_colors, 3, color.rgb(168, 182, 170))
+array.set(ma_colors, 4, #ff0000)
+
+array.set(ma_onoff, 0, onoff_A)
+array.set(ma_onoff, 1, onoff_B)
+array.set(ma_onoff, 2, onoff_C)
+array.set(ma_onoff, 3, onoff_D)
+array.set(ma_onoff, 4, onoff_E)
+
+// ラベルIDを保持する配列
+var array<label> ma_labels = array.new_label(5, na)
+
+// ラベル表示（最新バーのみ）
+for i = 0 to 4 by 1
+    if array.get(ma_onoff, i) and not na(array.get(ma_values, i)) and barstate.islast
+        // 前のラベルを削除
+        label.delete(array.get(ma_labels, i))
+        // 新しいラベルを描画
+        new_label = label.new(bar_index + label_offset, array.get(ma_values, i), text = array.get(ma_names, i) + ': ' + str.tostring(array.get(ma_values, i), '#.##'), color = array.get(ma_colors, i), textcolor = color.white, style = label.style_text_outline, size = size.normal) // ラベルIDを更新
+        array.set(ma_labels, i, new_label)
+
+//3ma 5 20 75 200
+//indicator(title="Moving Average", shorttitle="MA", overlay=true, timeframe="", timeframe_gaps=true)
+
+
+
+ma(source, length, type) =>
+    switch type
+        'SMA' => ta.sma(source, length)
+        'EMA' => ta.ema(source, length)
+        'SMMA (RMA)' => ta.rma(source, length)
+        'WMA' => ta.wma(source, length)
+        'VWMA' => ta.vwma(source, length)
+
+typeMA1 = input.string(title = 'Method', defval = 'SMA', options = ['SMA', 'EMA', 'SMMA (RMA)', 'WMA', 'VWMA'], group = 'MA')
+len1 = input.int(20, minval = 1, title = 'Length', group = 'MA')
+typeMA2 = input.string(title = 'Method', defval = 'SMA', options = ['SMA', 'EMA', 'SMMA (RMA)', 'WMA', 'VWMA'], group = 'MA')
+len2 = input.int(75, minval = 1, title = 'Length', group = 'MA')
+typeMA3 = input.string(title = 'Method', defval = 'SMA', options = ['SMA', 'EMA', 'SMMA (RMA)', 'WMA', 'VWMA'], group = 'MA')
+len3 = input.int(200, minval = 1, title = 'Length', group = 'MA')
+
+//src = input(close, title="Source")
+offset = input.int(title = 'Offset', defval = 1, minval = -500, maxval = 500)
+out1 = ma(srcA, len1, typeMA1)
+out2 = ma(srcA, len2, typeMA2)
+out3 = ma(srcA, len3, typeMA3)
+
+plot(out1, color = color.blue, title = 'MA1', offset = offset, linewidth = 3)
+plot(out2, color = color.orange, title = 'MA2', offset = offset, linewidth = 3)
+plot(out3, color = #8b4513, title = 'MA3', offset = offset, linewidth = 3)
+
+// サイン
+golden_cross() =>
+    out1 > out2
+death_cross() =>
+    out1 < out2
+
+Golden() =>
+    golden_cross() and death_cross()[1]
+Death() =>
+    death_cross() and golden_cross()[1]
+Death_1 = Death()
+
+// BUY/SELL 背景色を透明20%で表示
+bgcolor(Golden() ? color.new(#FFD700, 20) : Death_1 ? color.new(#D3D3D3, 20) : na)
+
+plotshape(Golden(), color = color.new(color.black, 0), style = shape.xcross, text = 'Golden Cross', location = location.top)
+plotshape(Death(), color = color.new(color.black, 0), style = shape.xcross, text = 'Death Cross', location = location.top)
+
+
+
+//typeMA = input.string(title = "Method", defval = "SMA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing")
+//smoothingLength = input.int(title = "Length", defval = 20, minval = 1, maxval = 100, group="Smoothing")
+
+//smoothingLine1 = ma(out1, smoothingLength, typeMA)
+//smoothingLine2 = ma(out2, smoothingLength, typeMA)
+//smoothingLine3 = ma(out3, smoothingLength, typeMA)
+//plot(smoothingLine1, title="Smoothing Line", color=#f37f20, offset=offset, display=display.none)
+//plot(smoothingLine2, title="Smoothing Line", color=#f37f20, offset=offset, display=display.none)
+//plot(smoothingLine3, title="Smoothing Line", color=#f37f20, offset=offset, display=display.none)

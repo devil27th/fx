@@ -1,0 +1,524 @@
+// © AlgoAlpha (MPL-2.0) and © LazyBear (original idea)
+// This merged script combines Smart Money Breakout Channels [AlgoAlpha] with Squeeze Momentum Indicator [LazyBear].
+// Use at your own risk. Keep original attributions and licenses.
+
+//@version=6
+strategy("Breakout Channels + Squeeze Momentum [Merged] — Enhanced", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.01, pyramiding=2)
+import TradingView/ta/10
+
+// ============================================================================
+// INPUTS (Breakout Channels)
+// ============================================================================
+
+overlap = input.bool(false, "Nested Channels", group = "Breakout Channels", tooltip="When enabled, allows multiple channels to overlap. When disabled, only one channel can exist at a time. Overlapping channels can show multiple breakout levels simultaneously.")
+strong = input.bool(true, "Strong Closes Only", group = "Breakout Channels", tooltip="When enabled, breakouts only trigger when more than 50% of the candle body is outside the channel. This reduces false signals from wicks. When disabled, any price movement outside the channel triggers a breakout.")
+length_norm = input.int(100, title="Normalization Length", minval=1, group = "Breakout Channels", tooltip="The number of bars used to calculate the highest high and lowest low for price normalization. Higher values create more stable normalization but may be less responsive to recent price changes.")
+length_box  = input.int(14, "Box Detection Length", minval=1, group = "Breakout Channels", tooltip="The number of bars used to detect channel formation patterns. Lower values create more frequent channels but may be more sensitive to noise. Higher values create fewer but potentially more significant channels.")
+
+shw_vol    = input.bool(true, "Show Volume Analysis", group = "Volume Analysis", tooltip="When enabled, displays volume analysis as candle-like bars within the channel. This helps identify volume patterns that may precede breakouts.")
+vol_mode   = input.string("Comparison", "Volume Display Mode", options=["Volume", "Comparison", "Delta"], group="Volume Analysis", tooltip="Volume: Shows total volume as symmetrical bars. Comparison: Shows up volume above midline, down volume below. Delta: Shows net volume delta (positive above, negative below midline).")
+tf         = input.timeframe("1", "Volume Delta Timeframe Source", group = "Volume Analysis", tooltip="The timeframe used to calculate volume delta data. Lower timeframes provide more granular volume analysis but may be noisier.")
+vol_scale  = input.float(0.5, "Volume Scale", minval=0.1, maxval=2.0, step=0.1, group="Volume Analysis", tooltip="Adjusts the height of volume bars relative to channel size. Higher values make volume bars more prominent, lower values make them more subtle.")
+
+text_size  = input.string("Tiny", "Volume Text Size", options=["Tiny","Small","Medium","Large"], group="Appearance", tooltip="Size of the volume text at the corner of the channels.")
+green      = input.color(#00ffbb, title = "Bullish Colour", group = "Appearance", tooltip = "Primary colour for bullish visual elements. Adjust for preferred palette – affects bars, fills, and labels when momentum is positive.")
+red        = input.color(#ff1100, title = "Bearish Colour", group = "Appearance", tooltip = "Primary colour for bearish visual elements. Adjust for preferred palette – affects bars, fills, and labels when momentum is negative.")
+
+// ============================================================================
+// INPUTS (Squeeze Momentum)
+// ============================================================================
+
+showSqz           = input.bool(true, "Show Squeeze Momentum", group="Squeeze Momentum")
+sqz_lenBB         = input.int(20, title="BB Length", group="Squeeze Momentum")
+sqz_multBB        = input.float(2.0, title="BB MultFactor", group="Squeeze Momentum")
+sqz_lenKC         = input.int(20, title="KC Length", group="Squeeze Momentum")
+sqz_multKC        = input.float(1.5, title="KC MultFactor", group="Squeeze Momentum")
+sqz_useTrueRange  = input.bool(true, title="Use TrueRange (KC)", group="Squeeze Momentum")
+
+// ============================================================================
+// INPUTS (Backtest / Trading)
+// ============================================================================
+
+enableBacktest = input.bool(true, "Enable Backtest/Orders", group="Backtest")
+tpPercent      = input.float(2.0, "Take Profit %", minval=0.0, step=0.1, group="Backtest")
+slPercent      = input.float(1.0, "Stop Loss %",   minval=0.0, step=0.1, group="Backtest")
+closeOnOpposite= input.bool(true, "Close on Opposite Signal", group="Backtest")
+strictSqz      = input.bool(true, "Strict Squeeze Confirmation (rising/ falling)", group="Backtest", tooltip="When enabled, BUY requires positive and rising SQZ; SELL requires negative and falling SQZ.")
+
+// ============================================================================
+// INPUTS (Risk & Exits)
+// ============================================================================
+
+useATRStops      = input.bool(true,  "Use ATR-based Stops/Targets", group="Risk & Exits")
+atrLen           = input.int(14,     "ATR Length", group="Risk & Exits")
+atrSLMult        = input.float(1.5,  "ATR Stop Multiplier", step=0.1, group="Risk & Exits")
+atrTPMult        = input.float(2.5,  "ATR Take Profit Multiplier", step=0.1, group="Risk & Exits")
+trailEnable      = input.bool(true,  "Enable ATR Trailing Stop", group="Risk & Exits")
+trailMult        = input.float(1.5,  "ATR Trailing Multiplier", step=0.1, group="Risk & Exits")
+breakevenEnable  = input.bool(true,  "Break-even after R multiple", group="Risk & Exits")
+breakevenRR      = input.float(1.0,  "Break-even at R multiple", minval=0.1, step=0.1, group="Risk & Exits")
+partialTPEnable  = input.bool(true,  "Partial Take Profit 50% at 1R", group="Risk & Exits")
+cooldownBars     = input.int(0,      "Cooldown bars after entry", minval=0, group="Risk & Exits")
+
+// ============================================================================
+// INPUTS (Risk Management)
+// ============================================================================
+
+riskSizingEnable = input.bool(false, "Use Risk-Based Position Sizing", group="Risk Management")
+riskPercent      = input.float(1.0,  "Risk % of Equity per Trade", minval=0.1, step=0.1, group="Risk Management")
+
+// ============================================================================
+// INPUTS (Filters)
+// ============================================================================
+
+enableTrendFilter     = input.bool(true,  "HTF EMA Trend Filter", group="Filters")
+tfTrend               = input.timeframe("60", "Trend Timeframe", group="Filters")
+emaLen                = input.int(200,    "Trend EMA Length", group="Filters")
+enableVolumeFilter    = input.bool(true,  "Breakout Volume Filter", group="Filters")
+volLenF               = input.int(20,     "Volume SMA Length", group="Filters")
+volMult               = input.float(1.2,  "Volume Multiplier", step=0.1, group="Filters")
+enableSqueezeRelease  = input.bool(false, "Only trade on Squeeze Release", group="Filters")
+releaseLookback       = input.int(3,      "Release Lookback Bars", minval=1, group="Filters")
+
+// ============================================================================
+// INPUTS (Session)
+// ============================================================================
+
+tradeSession = input.session("0000-2400", "Trading Session", group="Session")
+
+// ============================================================================
+// VARIABLES (Breakout Channels)
+// ============================================================================
+
+var boxes   = array.new_box()
+var boxes_u = array.new_box()
+var boxes_l = array.new_box()
+
+var gaugeLines   = array.new_line()
+var label  gaugeLabel   = na
+var centerLines  = array.new_line()
+
+// ============================================================================
+// FUNCTIONS
+// ============================================================================
+
+textSize(text_size) => text_size == "Tiny" ? size.tiny : text_size == "Small" ? size.small : text_size == "Medium" ? size.normal : size.large
+
+f_can_create(float tNew, float bNew) =>
+    ok = true
+    if boxes.size() > 0
+        for j = 0 to boxes.size()-1
+            if (tNew > box.get_bottom(boxes.get(j))) and (bNew < box.get_top(boxes.get(j)))
+                ok := false
+                break
+    ok
+
+getVolumeTransparency(float vol, float smoothed_vol) =>
+    if vol_mode == "Volume"
+        float vol_ratio = vol / smoothed_vol
+        float transparency = math.max(20, math.min(80, 80 - (vol_ratio - 0.5) * 40))
+        transparency
+    else
+        0
+
+// ============================================================================
+// CALCULATIONS (Breakout Channels)
+// ============================================================================
+
+lowestLow       = ta.lowest(low, length_norm)
+highestHigh     = ta.highest(high, length_norm)
+normalizedPrice = (close - lowestLow) / math.max(highestHigh - lowestLow, 1e-10)
+vol             = ta.stdev(normalizedPrice, 14)
+
+upper     = (ta.highestbars(vol, length_box + 1) + length_box)/length_box
+lower     = (ta.lowestbars(vol, length_box + 1) + length_box)/length_box
+
+upbreak   = 0.0
+downbreak = 0.0
+
+duration = math.max(nz(ta.barssince(ta.crossover(lower,upper))), 1)
+h = ta.highest(duration)
+l = ta.lowest(duration)
+
+// Replacement for ta.requestUpAndDownVolume(tf): derive up/down/ delta volume from security() data
+[secClose, secOpen, secVol] = request.security(syminfo.tickerid, tf, [close, open, volume])
+uv = secClose >= secOpen ? secVol : 0.0
+dv = secClose <  secOpen ? secVol : 0.0
+vold = uv - dv
+
+var hvold = vold
+var lvold = vold
+
+if ta.crossover(lower, upper)
+    hvold := vold
+    lvold := vold
+
+if vold > hvold
+    hvold := vold
+
+if vold < lvold
+    lvold := vold
+
+smoothedvol = ta.sma(volume, 20)
+vola        = ta.atr(length_box)/2
+
+bool newChannelFormed = false
+bool bullishBreakout  = false
+bool bearishBreakout  = false
+
+if ta.crossover(upper, lower) and duration > 10
+    if overlap or f_can_create(h, l)
+        boxes.unshift(box.new(bar_index-duration, h, bar_index, l, bgcolor = color.new(chart.fg_color, 90), border_color = na))
+        boxes_u.unshift(box.new(bar_index-duration, h, bar_index, h-vola, bgcolor = color.new(red, 70), border_color = na))
+        boxes_l.unshift(box.new(bar_index-duration, l+vola, bar_index, l, bgcolor = color.new(green, 70), border_color = na))
+        
+        float centerY = (h + l) / 2
+        centerLines.unshift(line.new(bar_index-duration, centerY, bar_index, centerY, color = color.new(chart.fg_color, 50), width = 1, style = line.style_dashed))
+        newChannelFormed := true
+
+if boxes.size() > 0
+    for i = 0 to boxes.size()-1
+        if ((strong ? math.avg(close, open) : close) > box.get_top(boxes.get(i)))
+            upbreak := box.get_bottom(boxes.get(i))
+            boxes.remove(i)
+            boxes_u.remove(i)
+            boxes_l.remove(i)
+            centerLines.remove(i)
+            bullishBreakout := true
+            
+        else if ((strong ? math.avg(close, open) : close) < box.get_bottom(boxes.get(i)))
+            downbreak := box.get_top(boxes.get(i))
+            boxes.remove(i)
+            boxes_u.remove(i)
+            boxes_l.remove(i)
+            centerLines.remove(i)
+            bearishBreakout := true
+                  
+        else
+            box.set_right(boxes.get(i), bar_index)
+            box.set_right(boxes_u.get(i), bar_index)
+            box.set_right(boxes_l.get(i), bar_index)
+            line.set_x2(centerLines.get(i), bar_index)
+            
+            // Add volume text to appropriate box based on price position
+            float boxMidline = (box.get_top(boxes.get(i)) + box.get_bottom(boxes.get(i))) / 2
+            float currentPrice = strong ? math.avg(close, open) : close
+            
+            string volText = ""
+            if vol_mode == "Volume"
+                volText := str.tostring(math.round(volume / 1000, 1)) + "K"
+            else if vol_mode == "Comparison"
+                volText := str.tostring(math.round(uv / 1000, 1)) + "K/" + str.tostring(math.round(dv / 1000, 1)) + "K"
+            else if vol_mode == "Delta"
+                volText := str.tostring(math.round(vold / 1000, 1)) + "K"
+            
+            if currentPrice > boxMidline
+                // Price is above midline, add text to lower (green) box
+                box.set_text(boxes_l.get(i), volText)
+                box.set_text_halign(boxes_l.get(i), text.align_right)
+                box.set_text_color(boxes_l.get(i), color.new(chart.fg_color, 30))
+                box.set_text_size(boxes_l.get(i), textSize(text_size))
+                box.set_text(boxes_u.get(i), "")
+            else
+                // Price is below midline, add text to upper (red) box
+                box.set_text(boxes_u.get(i), volText)
+                box.set_text_halign(boxes_u.get(i), text.align_right)
+                box.set_text_color(boxes_u.get(i), color.new(chart.fg_color, 30))
+                box.set_text_size(boxes_u.get(i), textSize(text_size))
+                box.set_text(boxes_l.get(i), "")
+
+float currentMidline = na
+float channelHeight = na
+
+if boxes.size() > 0
+    float topBound = box.get_top(boxes.get(0))
+    float bottomBound = box.get_bottom(boxes.get(0))
+    currentMidline := (topBound + bottomBound) / 2
+    channelHeight := (topBound - bottomBound) * vol_scale
+
+float vol_upper_open = na
+float vol_upper_high = na  
+float vol_upper_low = na
+float vol_upper_close = na
+
+float vol_lower_open = na
+float vol_lower_high = na
+float vol_lower_low = na  
+float vol_lower_close = na
+
+if not na(currentMidline) and not na(channelHeight) and shw_vol
+    if vol_mode == "Volume"
+        float vol_height = (volume / smoothedvol) * (channelHeight / 4)
+        vol_upper_open := currentMidline
+        vol_upper_close := currentMidline + vol_height
+        vol_upper_high := currentMidline + vol_height
+        vol_upper_low := currentMidline
+        
+        vol_lower_open := currentMidline
+        vol_lower_close := currentMidline - vol_height
+        vol_lower_high := currentMidline
+        vol_lower_low := currentMidline - vol_height
+        
+    else if vol_mode == "Comparison"
+        float uv_height = na(uv) ? 0 : (uv / smoothedvol) * (channelHeight / 4)
+        float dv_height = na(dv) ? 0 : (dv / smoothedvol) * (channelHeight / 4)
+        
+        vol_upper_open := currentMidline
+        vol_upper_close := currentMidline + uv_height  
+        vol_upper_high := currentMidline + uv_height
+        vol_upper_low := currentMidline
+        
+        vol_lower_open := currentMidline
+        vol_lower_close := currentMidline + dv_height
+        vol_lower_high := currentMidline  
+        vol_lower_low := currentMidline + dv_height
+        
+    else if vol_mode == "Delta" 
+        float delta_height = na(vold) ? 0 : math.abs(vold / smoothedvol) * (channelHeight / 4)
+        
+        if vold >= 0
+            vol_upper_open := currentMidline
+            vol_upper_close := currentMidline + delta_height
+            vol_upper_high := currentMidline + delta_height  
+            vol_upper_low := currentMidline
+            
+            vol_lower_open := currentMidline
+            vol_lower_close := currentMidline
+            vol_lower_high := currentMidline
+            vol_lower_low := currentMidline
+        else
+            vol_upper_open := currentMidline
+            vol_upper_close := currentMidline
+            vol_upper_high := currentMidline
+            vol_upper_low := currentMidline
+            
+            vol_lower_open := currentMidline
+            vol_lower_close := currentMidline - delta_height  
+            vol_lower_high := currentMidline
+            vol_lower_low := currentMidline - delta_height
+
+color upperColor = na
+color lowerColor = na
+
+if vol_mode == "Volume"
+    float transparency = getVolumeTransparency(volume, smoothedvol)
+    upperColor := color.new(chart.fg_color, transparency)
+    lowerColor := color.new(chart.fg_color, transparency)
+else
+    upperColor := green
+    lowerColor := red
+
+// ============================================================================
+// CALCULATIONS (Squeeze Momentum)
+// ============================================================================
+
+// BB
+sqz_source   = close
+sqz_basis    = ta.sma(sqz_source, sqz_lenBB)
+sqz_dev      = sqz_multBB * ta.stdev(sqz_source, sqz_lenBB)
+sqz_upperBB  = sqz_basis + sqz_dev
+sqz_lowerBB  = sqz_basis - sqz_dev
+
+// KC
+sqz_ma       = ta.sma(sqz_source, sqz_lenKC)
+sqz_range    = sqz_useTrueRange ? ta.tr(true) : (high - low)
+sqz_rangema  = ta.sma(sqz_range, sqz_lenKC)
+sqz_upperKC  = sqz_ma + sqz_rangema * sqz_multKC
+sqz_lowerKC  = sqz_ma - sqz_rangema * sqz_multKC
+
+sqzOn  = (sqz_lowerBB > sqz_lowerKC) and (sqz_upperBB < sqz_upperKC)
+sqzOff = (sqz_lowerBB < sqz_lowerKC) and (sqz_upperBB > sqz_upperKC)
+noSqz  = (not sqzOn) and (not sqzOff)
+
+sqz_val = ta.linreg(sqz_source - math.avg(math.avg(ta.highest(high, sqz_lenKC), ta.lowest(low, sqz_lenKC)), ta.sma(close, sqz_lenKC)), sqz_lenKC, 0)
+
+sqz_bcolor = sqz_val > 0 ? (sqz_val > nz(sqz_val[1]) ? color.lime : color.green) : (sqz_val < nz(sqz_val[1]) ? color.red : color.maroon)
+sqz_scolor = noSqz ? color.blue : (sqzOn ? color.black : color.gray)
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+plotshape(upbreak != 0 ? upbreak : na, "Bullish Breakout Signal", shape.labelup, location.absolute, green, text = "▲", textcolor = chart.fg_color)
+plotshape(downbreak != 0 ? downbreak : na, "Bearish Breakout Signal", shape.labeldown, location.absolute, red, text = "▼", textcolor = chart.fg_color)
+
+plotcandle(vol_upper_open, vol_upper_high, vol_upper_low, vol_upper_close, color=upperColor, wickcolor=upperColor, bordercolor=upperColor)
+plotcandle(vol_lower_open, vol_lower_high, vol_lower_low, vol_lower_close, color=lowerColor, wickcolor=lowerColor, bordercolor=lowerColor)
+
+// Squeeze Momentum (overlay on left scale)
+plot(showSqz ? sqz_val : na, title="SQZMOM", color=sqz_bcolor, style=plot.style_histogram, linewidth=4)
+plot(showSqz ? 0 : na, title="SQZ Zero", color=sqz_scolor, style=plot.style_cross, linewidth=2)
+
+// ============================================================================
+// COMBINED SIGNALS (BUY/SELL) & PLOTS
+// ============================================================================
+
+sqzBull = strictSqz ? (sqz_val > 0 and sqz_val > nz(sqz_val[1])) : (sqz_val > 0)
+sqzBear = strictSqz ? (sqz_val < 0 and sqz_val < nz(sqz_val[1])) : (sqz_val < 0)
+
+// Filters
+atrVal     = ta.atr(atrLen)
+emaHTF     = request.security(syminfo.tickerid, tfTrend, ta.ema(close, emaLen))
+longTrend  = close > emaHTF
+shortTrend = close < emaHTF
+volCond    = volume > ta.sma(volume, volLenF) * volMult
+releaseOK  = (not sqzOn) and (ta.barssince(sqzOn) <= releaseLookback)
+inSession  = not na(time(timeframe.period, tradeSession))
+
+baseBuy  = bullishBreakout and sqzBull
+baseSell = bearishBreakout and sqzBear
+
+filtersLong  = (not enableTrendFilter or longTrend) and (not enableVolumeFilter or volCond) and (not enableSqueezeRelease or releaseOK) and inSession
+filtersShort = (not enableTrendFilter or shortTrend) and (not enableVolumeFilter or volCond) and (not enableSqueezeRelease or releaseOK) and inSession
+
+var int lastEntryBar = na
+cooldownOK = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
+
+buySignal  = baseBuy  and filtersLong  and cooldownOK
+sellSignal = baseSell and filtersShort and cooldownOK
+
+plotshape(buySignal ? low : na, title="BUY", style=shape.labelup, location=location.absolute, color=color.new(color.lime, 0), text="BUY", textcolor=color.black, size=size.tiny)
+plotshape(sellSignal ? high : na, title="SELL", style=shape.labeldown, location=location.absolute, color=color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.tiny)
+
+// ============================================================================
+// BACKTEST / ORDERS
+// ============================================================================
+
+if enableBacktest
+    // Reverse/close logic on opposite signal (optional)
+    if closeOnOpposite
+        if buySignal and strategy.position_size < 0
+            strategy.close("S-Entry")
+        if sellSignal and strategy.position_size > 0
+            strategy.close("L-Entry")
+
+    // Entries
+    if buySignal and strategy.position_size <= 0
+        // Optional risk-based sizing for longs
+        if riskSizingEnable and useATRStops
+            float ePriceL = close
+            float stopBaseL = ePriceL - atrSLMult * atrVal
+            float riskPerUnitL = math.max(ePriceL - stopBaseL, 0)
+            float qtyL = riskPerUnitL > 0 ? (strategy.equity * (riskPercent/100)) / (riskPerUnitL * syminfo.pointvalue) : na
+            strategy.entry("L-Entry", strategy.long, qty = qtyL)
+        else if riskSizingEnable and not useATRStops
+            float ePriceL2 = close
+            float stopBaseL2 = ePriceL2 * (1 - slPercent/100)
+            float riskPerUnitL2 = math.max(ePriceL2 - stopBaseL2, 0)
+            float qtyL2 = riskPerUnitL2 > 0 ? (strategy.equity * (riskPercent/100)) / (riskPerUnitL2 * syminfo.pointvalue) : na
+            strategy.entry("L-Entry", strategy.long, qty = qtyL2)
+        else
+            strategy.entry("L-Entry", strategy.long)
+        lastEntryBar := bar_index
+    if sellSignal and strategy.position_size >= 0
+        // Optional risk-based sizing for shorts
+        if riskSizingEnable and useATRStops
+            float ePriceS = close
+            float stopBaseS = ePriceS + atrSLMult * atrVal
+            float riskPerUnitS = math.max(stopBaseS - ePriceS, 0)
+            float qtyS = riskPerUnitS > 0 ? (strategy.equity * (riskPercent/100)) / (riskPerUnitS * syminfo.pointvalue) : na
+            strategy.entry("S-Entry", strategy.short, qty = qtyS)
+        else if riskSizingEnable and not useATRStops
+            float ePriceS2 = close
+            float stopBaseS2 = ePriceS2 * (1 + slPercent/100)
+            float riskPerUnitS2 = math.max(stopBaseS2 - ePriceS2, 0)
+            float qtyS2 = riskPerUnitS2 > 0 ? (strategy.equity * (riskPercent/100)) / (riskPerUnitS2 * syminfo.pointvalue) : na
+            strategy.entry("S-Entry", strategy.short, qty = qtyS2)
+        else
+            strategy.entry("S-Entry", strategy.short)
+        lastEntryBar := bar_index
+
+    // Exits (TP/SL)
+    // Base stops/targets
+    float longStopBase  = useATRStops ? strategy.position_avg_price - atrSLMult * atrVal : strategy.position_avg_price * (1 - slPercent/100)
+    float longLimitBase = useATRStops ? strategy.position_avg_price + atrTPMult * atrVal : strategy.position_avg_price * (1 + tpPercent/100)
+    float shortStopBase = useATRStops ? strategy.position_avg_price + atrSLMult * atrVal : strategy.position_avg_price * (1 + slPercent/100)
+    float shortLimitBase= useATRStops ? strategy.position_avg_price - atrTPMult * atrVal : strategy.position_avg_price * (1 - tpPercent/100)
+
+    // Break-even adjustment
+    float longRisk  = strategy.position_avg_price - longStopBase
+    float shortRisk = shortStopBase - strategy.position_avg_price
+    float longStop  = breakevenEnable and strategy.position_size > 0  and (close - strategy.position_avg_price >= breakevenRR * longRisk)  ? math.max(longStopBase, strategy.position_avg_price) : longStopBase
+    float shortStop = breakevenEnable and strategy.position_size < 0  and (strategy.position_avg_price - close >= breakevenRR * shortRisk) ? math.min(shortStopBase, strategy.position_avg_price) : shortStopBase
+
+    // Partial take profit at 1R (50%)
+    if partialTPEnable and strategy.position_size > 0 and longRisk > 0
+        float tp1L = strategy.position_avg_price + longRisk
+        strategy.exit("L-TP1", from_entry="L-Entry", limit=tp1L, qty_percent=50)
+    if partialTPEnable and strategy.position_size < 0 and shortRisk > 0
+        float tp1S = strategy.position_avg_price - shortRisk
+        strategy.exit("S-TP1", from_entry="S-Entry", limit=tp1S, qty_percent=50)
+
+    // Main exits with optional ATR trailing
+    if strategy.position_size > 0
+        float trailPtsL = trailEnable ? atrVal * trailMult : na
+        strategy.exit("L-Exit", from_entry="L-Entry", stop=longStop, limit=longLimitBase, trail_points=trailPtsL)
+    if strategy.position_size < 0
+        float trailPtsS = trailEnable ? atrVal * trailMult : na
+        strategy.exit("S-Exit", from_entry="S-Entry", stop=shortStop, limit=shortLimitBase, trail_points=trailPtsS)
+
+volumeAvailable = not na(volume)
+
+if barstate.islast
+    bool channelActive = boxes.size() > 0 and upbreak == 0 and downbreak == 0
+    
+    if array.size(gaugeLines) > 0
+        for ln in gaugeLines
+            line.delete(ln)
+        array.clear(gaugeLines)
+    
+    if not na(gaugeLabel)
+        label.delete(gaugeLabel)
+        gaugeLabel := na
+    
+    if channelActive
+        float topBound    = box.get_top(boxes.get(0))
+        float bottomBound = box.get_bottom(boxes.get(0))
+        
+        if not na(topBound) and not na(bottomBound) and topBound != bottomBound
+            int segments = 21
+            float segLen = (topBound - bottomBound) / segments
+            
+            for i = 0 to segments - 1
+                float y1 = topBound   - i * segLen
+                float y2 = topBound   - (i + 1) * segLen
+                color segCol = color.from_gradient(y1, bottomBound, topBound, red, green)
+                line ln = line.new(x1 = bar_index + 2,
+                                     y1 = y1,
+                                     x2 = bar_index + 2,
+                                     y2 = y2,
+                                     color = segCol,
+                                     width = 4)
+                gaugeLines.unshift(ln)
+            
+            float delvol = -100*2*((vold-lvold)/(hvold-lvold)-0.5)
+            delvol := math.max(math.min(delvol, 100), -100)
+            float pointerPos = topBound - ((delvol + 100) / 200) * (topBound - bottomBound)
+            gaugeLabel := label.new(x = bar_index + 3,
+                                     y = pointerPos,
+                                     text = "◀",
+                                     color = na,
+                                     textcolor = chart.fg_color,
+                                     size = size.small,
+                                     style = label.style_label_left)
+
+if not volumeAvailable
+    var gaugeWarnTable = table.new(position = position.top_right, columns = 1, rows = 1, bgcolor = red, border_width = 1, border_color = chart.fg_color, frame_color = chart.fg_color, frame_width = 1)
+    table.cell(gaugeWarnTable, 0, 0, "Volume not available\nGauge may not work as expected", text_color = chart.fg_color, text_halign = text.align_center, text_size = size.small)
+
+// ============================================================================
+// ALERTS (strategy-compatible)
+// ============================================================================
+
+if newChannelFormed
+    alert("New Channel Formation", alert.freq_once_per_bar)
+if bullishBreakout
+    alert("Bullish Breakout: Price broke above the channel", alert.freq_once_per_bar)
+if bearishBreakout
+    alert("Bearish Breakout: Price broke below the channel", alert.freq_once_per_bar)
+
+// Combined signals alerts
+if buySignal
+    alert("BUY: Channel bullish breakout + Squeeze bullish confirmation", alert.freq_once_per_bar)
+if sellSignal
+    alert("SELL: Channel bearish breakout + Squeeze bearish confirmation", alert.freq_once_per_bar)
