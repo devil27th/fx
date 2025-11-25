@@ -1,0 +1,422 @@
+// Ultimate Trading Strategy: Smart Money + Trendlines + Breakout Channels + Squeeze
+// 複数の手法を統合した高精度売買システム
+// CC BY-NC-SA 4.0
+
+//@version=5
+strategy("Ultimate Strategy [Smart Money + Trendlines + Squeeze]", 
+     shorttitle="Ultimate Strategy", 
+     overlay=true, 
+     initial_capital=100000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=10,
+     commission_type=strategy.commission.percent, 
+     commission_value=0.04,
+     slippage=2,
+     pyramiding=0)
+
+// ============================================================================
+// グループ定義
+// ============================================================================
+G_SIGNAL    = "🎯 シグナル設定"
+G_TRENDLINE = "📈 Trendline Settings"
+G_SQUEEZE   = "💫 Squeeze Momentum"
+G_SMC       = "💰 Smart Money Concepts"
+G_RISK      = "⚠️ リスク管理"
+G_FILTER    = "🔍 フィルター"
+G_BACKTEST  = "📊 バックテスト"
+
+// ============================================================================
+// 入力: シグナル設定
+// ============================================================================
+signalMode = input.string("バランス型", "シグナルモード", 
+     options=["高勝率重視", "バランス型", "機会重視"], 
+     group=G_SIGNAL,
+     tooltip="高勝率重視: 3段階すべて満たす\nバランス型: レベル1 + (レベル2の2つ OR レベル3)\n機会重視: レベル1 + (レベル2の1つ OR レベル3)")
+
+useTrendlineSignal = input.bool(true, "Trendlineブレイクシグナル使用", group=G_SIGNAL)
+useChannelSignal = input.bool(true, "Channelブレイクシグナル使用", group=G_SIGNAL)
+
+// ============================================================================
+// 入力: Trendline
+// ============================================================================
+tl_length = input.int(14, "Swing Detection Lookback", minval=5, group=G_TRENDLINE)
+tl_mult = input.float(1.0, "Slope Multiplier", minval=0, step=0.1, group=G_TRENDLINE)
+tl_calcMethod = input.string("Atr", "Slope Calculation", options=["Atr","Stdev","Linreg"], group=G_TRENDLINE)
+
+// ============================================================================
+// 入力: Squeeze Momentum
+// ============================================================================
+sqz_lenBB = input.int(20, "BB Length", group=G_SQUEEZE)
+sqz_multBB = input.float(2.0, "BB Mult", group=G_SQUEEZE)
+sqz_lenKC = input.int(20, "KC Length", group=G_SQUEEZE)
+sqz_multKC = input.float(1.5, "KC Mult", group=G_SQUEEZE)
+sqz_useTR = input.bool(true, "Use TrueRange", group=G_SQUEEZE)
+sqzReleaseWindow = input.int(3, "スクイーズ解放確認期間（バー）", minval=1, group=G_SQUEEZE)
+
+// ============================================================================
+// 入力: Smart Money Concepts
+// ============================================================================
+useOrderBlocks = input.bool(true, "Order Block確認", group=G_SMC)
+usePremiumDiscount = input.bool(true, "Premium/Discount Zone確認", group=G_SMC)
+useBOS = input.bool(true, "BOS/CHoCH確認", group=G_SMC)
+useFVG = input.bool(false, "Fair Value Gap確認", group=G_SMC, tooltip="FVGは高度な設定。初心者はOFF推奨")
+
+obLookback = input.int(50, "Order Block検出期間", minval=10, group=G_SMC)
+pdLookback = input.int(50, "Premium/Discount検出期間", minval=10, group=G_SMC)
+
+// ============================================================================
+// 入力: リスク管理
+// ============================================================================
+useATRStops = input.bool(true, "ATRベースのSL/TP使用", group=G_RISK)
+atrLen = input.int(14, "ATR Length", group=G_RISK)
+atrSLMult = input.float(1.5, "ATR SL倍率", step=0.1, group=G_RISK)
+atrTPMult = input.float(4.0, "ATR TP倍率", minval=1.0, step=0.5, group=G_RISK, tooltip="推奨: 3.0~5.0（大きいほど利確幅が広がる）")
+
+useRRRatio = input.bool(true, "リスクリワード比使用", group=G_RISK)
+rrRatio = input.float(3.0, "リスク:リワード比", minval=1.0, step=0.5, group=G_RISK, tooltip="1リスクに対する利益倍率（例: 3.0 = 1:3）")
+
+slPercent = input.float(1.0, "固定SL %", minval=0.1, step=0.1, group=G_RISK)
+tpPercent = input.float(3.0, "固定TP %", minval=0.1, step=0.5, group=G_RISK)
+
+minTPPips = input.float(20.0, "最小利確PIPS", minval=5.0, step=5.0, group=G_RISK, tooltip="利確幅の最低保証（PIPS換算）")
+
+partialTP = input.bool(true, "部分利確（50% at 1.5R）", group=G_RISK)
+partialRatio = input.float(1.5, "部分利確R倍率", minval=0.5, step=0.5, group=G_RISK, tooltip="部分利確の発動タイミング（1R=SL幅）")
+
+trailEnable = input.bool(true, "トレーリングストップ有効", group=G_RISK)
+trailMult = input.float(2.0, "トレーリング倍率", step=0.5, group=G_RISK, tooltip="利益が出たらATRの何倍で追尾するか")
+
+// ============================================================================
+// 入力: フィルター
+// ============================================================================
+useTrendFilter = input.bool(true, "上位足トレンドフィルター", group=G_FILTER)
+trendTF = input.timeframe("240", "トレンド判定足", group=G_FILTER)
+emaLen = input.int(200, "トレンドEMA期間", group=G_FILTER)
+
+useVolFilter = input.bool(true, "ボリュームフィルター", group=G_FILTER)
+volLen = input.int(20, "Volume SMA期間", group=G_FILTER)
+volMult = input.float(1.2, "Volume倍率", step=0.1, group=G_FILTER)
+
+useSessionFilter = input.bool(false, "セッションフィルター", group=G_FILTER)
+tradingSession = input.session("0800-1600", "取引時間帯", group=G_FILTER)
+
+// ============================================================================
+// 入力: バックテスト
+// ============================================================================
+enableBacktest = input.bool(true, "バックテスト有効", group=G_BACKTEST)
+startDate = input.time(timestamp("2020-01-01"), "開始日", group=G_BACKTEST)
+endDate = input.time(timestamp("2099-12-31"), "終了日", group=G_BACKTEST)
+
+// ============================================================================
+// 計算: Trendline
+// ============================================================================
+var float tl_upper = 0.0
+var float tl_lower = 0.0
+var float tl_slope_ph = 0.0
+var float tl_slope_pl = 0.0
+
+tl_n = bar_index
+tl_ph = ta.pivothigh(tl_length, tl_length)
+tl_pl = ta.pivotlow(tl_length, tl_length)
+
+tl_slope = tl_calcMethod == "Atr" ? ta.atr(tl_length) / tl_length * tl_mult : tl_calcMethod == "Stdev" ? ta.stdev(close, tl_length) / tl_length * tl_mult : math.abs(ta.sma(close * tl_n, tl_length) - ta.sma(close, tl_length) * ta.sma(tl_n, tl_length)) / ta.variance(tl_n, tl_length) / 2 * tl_mult
+
+tl_slope_ph := tl_ph ? tl_slope : tl_slope_ph
+tl_slope_pl := tl_pl ? tl_slope : tl_slope_pl
+
+tl_upper := tl_ph ? tl_ph : tl_upper - tl_slope_ph
+tl_lower := tl_pl ? tl_pl : tl_lower + tl_slope_pl
+
+var int tl_upos = 0
+var int tl_dnos = 0
+tl_upos := tl_ph ? 0 : close > tl_upper - tl_slope_ph * tl_length ? 1 : tl_upos
+tl_dnos := tl_pl ? 0 : close < tl_lower + tl_slope_pl * tl_length ? 1 : tl_dnos
+
+trendlineBuy = tl_upos > tl_upos[1]
+trendlineSell = tl_dnos > tl_dnos[1]
+
+// ============================================================================
+// 計算: Squeeze Momentum
+// ============================================================================
+sqz_source = close
+sqz_basis = ta.sma(sqz_source, sqz_lenBB)
+sqz_dev = sqz_multBB * ta.stdev(sqz_source, sqz_lenBB)
+sqz_upperBB = sqz_basis + sqz_dev
+sqz_lowerBB = sqz_basis - sqz_dev
+
+sqz_ma = ta.sma(sqz_source, sqz_lenKC)
+sqz_range = sqz_useTR ? ta.tr : (high - low)
+sqz_rangema = ta.sma(sqz_range, sqz_lenKC)
+sqz_upperKC = sqz_ma + sqz_rangema * sqz_multKC
+sqz_lowerKC = sqz_ma - sqz_rangema * sqz_multKC
+
+sqzOn = (sqz_lowerBB > sqz_lowerKC) and (sqz_upperBB < sqz_upperKC)
+sqzOff = (sqz_lowerBB < sqz_lowerKC) and (sqz_upperBB > sqz_upperKC)
+
+sqz_val = ta.linreg(sqz_source - math.avg(math.avg(ta.highest(high, sqz_lenKC), ta.lowest(low, sqz_lenKC)), ta.sma(close, sqz_lenKC)), sqz_lenKC, 0)
+
+sqzBullish = sqz_val > 0 and sqz_val > nz(sqz_val[1])
+sqzBearish = sqz_val < 0 and sqz_val < nz(sqz_val[1])
+sqzReleased = ta.barssince(sqzOn) <= sqzReleaseWindow and not sqzOn
+
+// ============================================================================
+// 計算: Smart Money Concepts (簡易版)
+// ============================================================================
+
+// Order Blocks検出（簡易）
+var float bullOB_high = na
+var float bullOB_low = na
+var float bearOB_high = na
+var float bearOB_low = na
+
+// 上昇後の陰線 → Bullish OB
+if close[1] > open[1] and close < open and (high - low) > ta.atr(14) * 0.5
+    bullOB_high := high
+    bullOB_low := low
+
+// 下落後の陽線 → Bearish OB
+if close[1] < open[1] and close > open and (high - low) > ta.atr(14) * 0.5
+    bearOB_high := high
+    bearOB_low := low
+
+inBullishOB = not na(bullOB_low) and low <= bullOB_high and low >= bullOB_low
+inBearishOB = not na(bearOB_high) and high >= bearOB_low and high <= bearOB_high
+
+// Premium/Discount Zones
+swingHigh = ta.highest(high, pdLookback)
+swingLow = ta.lowest(low, pdLookback)
+midPoint = (swingHigh + swingLow) / 2
+premiumLevel = midPoint + (swingHigh - midPoint) * 0.5
+discountLevel = midPoint - (midPoint - swingLow) * 0.5
+
+inPremiumZone = close > premiumLevel
+inDiscountZone = close < discountLevel
+
+// BOS/CHoCH検出（簡易）
+var int trendBias = 0
+var float lastSwingHigh = na
+var float lastSwingLow = na
+
+pivotH = ta.pivothigh(high, 5, 5)
+pivotL = ta.pivotlow(low, 5, 5)
+
+if not na(pivotH)
+    lastSwingHigh := pivotH
+if not na(pivotL)
+    lastSwingLow := pivotL
+
+bullishBOS = not na(lastSwingHigh) and close > lastSwingHigh and trendBias <= 0
+bearishBOS = not na(lastSwingLow) and close < lastSwingLow and trendBias >= 0
+
+if bullishBOS
+    trendBias := 1
+if bearishBOS
+    trendBias := -1
+
+// ============================================================================
+// レベル判定
+// ============================================================================
+
+// レベル1: プライマリシグナル
+level1_buy = (useTrendlineSignal and trendlineBuy) or (useChannelSignal and trendlineBuy)
+level1_sell = (useTrendlineSignal and trendlineSell) or (useChannelSignal and trendlineSell)
+
+// レベル2: Smart Money確認（複数条件）
+smcBuyCount = 0
+smcSellCount = 0
+
+if useOrderBlocks and inBullishOB
+    smcBuyCount += 1
+if useOrderBlocks and inBearishOB
+    smcSellCount += 1
+
+if usePremiumDiscount and inDiscountZone
+    smcBuyCount += 1
+if usePremiumDiscount and inPremiumZone
+    smcSellCount += 1
+
+if useBOS and bullishBOS
+    smcBuyCount += 1
+if useBOS and bearishBOS
+    smcSellCount += 1
+
+level2_buy = smcBuyCount >= 2
+level2_sell = smcSellCount >= 2
+
+level2_buy_weak = smcBuyCount >= 1
+level2_sell_weak = smcSellCount >= 1
+
+// レベル3: モメンタム確認
+level3_buy = sqzBullish and sqzReleased
+level3_sell = sqzBearish and sqzReleased
+
+// ============================================================================
+// フィルター
+// ============================================================================
+atrVal = ta.atr(atrLen)
+
+// トレンドフィルター
+htfEMA = request.security(syminfo.tickerid, trendTF, ta.ema(close, emaLen))
+longTrend = close > htfEMA
+shortTrend = close < htfEMA
+
+// ボリュームフィルター
+volCondition = volume > ta.sma(volume, volLen) * volMult
+
+// セッションフィルター
+inSession = not useSessionFilter or not na(time(timeframe.period, tradingSession))
+
+// バックテスト期間フィルター
+inDateRange = true
+if enableBacktest
+    inDateRange := time >= startDate and time <= endDate
+
+// ============================================================================
+// 総合シグナル生成
+// ============================================================================
+buySignal = false
+sellSignal = false
+
+if signalMode == "高勝率重視"
+    // 3段階すべて必要
+    buySignal := level1_buy and level2_buy and level3_buy
+    sellSignal := level1_sell and level2_sell and level3_sell
+    
+else if signalMode == "バランス型"
+    // レベル1 + (レベル2の2つ OR レベル3)
+    buySignal := level1_buy and (level2_buy or level3_buy)
+    sellSignal := level1_sell and (level2_sell or level3_sell)
+    
+else if signalMode == "機会重視"
+    // レベル1 + (レベル2の1つ OR レベル3)
+    buySignal := level1_buy and (level2_buy_weak or level3_buy)
+    sellSignal := level1_sell and (level2_sell_weak or level3_sell)
+
+// フィルター適用
+buySignal := buySignal and (not useTrendFilter or longTrend) and (not useVolFilter or volCondition) and inSession and inDateRange
+sellSignal := sellSignal and (not useTrendFilter or shortTrend) and (not useVolFilter or volCondition) and inSession and inDateRange
+
+// ============================================================================
+// 描画
+// ============================================================================
+plot(tl_upper, "Trendline Upper", color=color.new(color.red, 50), linewidth=1)
+plot(tl_lower, "Trendline Lower", color=color.new(color.green, 50), linewidth=1)
+
+// Premium/Discount Zones
+p_premium = plot(premiumLevel, "Premium", color=color.new(color.red, 80))
+p_mid = plot(midPoint, "Equilibrium", color=color.new(color.gray, 80))
+p_discount = plot(discountLevel, "Discount", color=color.new(color.green, 80))
+
+fill(p_premium, p_mid, color=color.new(color.red, 95))
+fill(p_mid, p_discount, color=color.new(color.green, 95))
+
+// Order Blocks
+bgcolor(inBullishOB ? color.new(color.green, 90) : na, title="Bullish OB")
+bgcolor(inBearishOB ? color.new(color.red, 90) : na, title="Bearish OB")
+
+// Squeeze Momentum (下部)
+sqzColor = sqz_val > 0 ? (sqz_val > nz(sqz_val[1]) ? color.lime : color.green) : (sqz_val < nz(sqz_val[1]) ? color.red : color.maroon)
+plot(sqz_val, "Squeeze Momentum", color=sqzColor, style=plot.style_histogram, linewidth=2)
+hline(0, "Zero Line", color=color.gray)
+
+// シグナル表示
+plotshape(buySignal ? low : na, "BUY", shape.labelup, location.absolute, color.new(color.lime, 0), text="BUY", textcolor=color.black, size=size.small)
+plotshape(sellSignal ? high : na, "SELL", shape.labeldown, location.absolute, color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
+
+// ============================================================================
+// バックテスト実行
+// ============================================================================
+if enableBacktest
+    // エントリー
+    if buySignal and strategy.position_size == 0
+        strategy.entry("Long", strategy.long)
+        
+    if sellSignal and strategy.position_size == 0
+        strategy.entry("Short", strategy.short)
+    
+    // エグジット設定
+    if strategy.position_size > 0
+        // Long exits
+        longSL = useATRStops ? strategy.position_avg_price - atrSLMult * atrVal : strategy.position_avg_price * (1 - slPercent/100)
+        
+        // リスクリワード比を使用するか、ATR倍率を使用するか
+        longRisk = strategy.position_avg_price - longSL
+        longTP = useRRRatio ? strategy.position_avg_price + longRisk * rrRatio : (useATRStops ? strategy.position_avg_price + atrTPMult * atrVal : strategy.position_avg_price * (1 + tpPercent/100))
+        
+        // 最小PIPS保証
+        pipSize = syminfo.mintick * 10
+        minTPDistance = minTPPips * pipSize
+        if longTP - strategy.position_avg_price < minTPDistance
+            longTP := strategy.position_avg_price + minTPDistance
+        
+        if partialTP
+            longTP1 = strategy.position_avg_price + longRisk * partialRatio
+            strategy.exit("L-TP1", from_entry="Long", limit=longTP1, qty_percent=50)
+        
+        if trailEnable
+            trailPts = atrVal * trailMult
+            strategy.exit("L-Exit", from_entry="Long", stop=longSL, limit=longTP, trail_points=trailPts)
+        else
+            strategy.exit("L-Exit", from_entry="Long", stop=longSL, limit=longTP)
+    
+    if strategy.position_size < 0
+        // Short exits
+        shortSL = useATRStops ? strategy.position_avg_price + atrSLMult * atrVal : strategy.position_avg_price * (1 + slPercent/100)
+        
+        // リスクリワード比を使用するか、ATR倍率を使用するか
+        shortRisk = shortSL - strategy.position_avg_price
+        shortTP = useRRRatio ? strategy.position_avg_price - shortRisk * rrRatio : (useATRStops ? strategy.position_avg_price - atrTPMult * atrVal : strategy.position_avg_price * (1 - tpPercent/100))
+        
+        // 最小PIPS保証
+        pipSize = syminfo.mintick * 10
+        minTPDistance = minTPPips * pipSize
+        if strategy.position_avg_price - shortTP < minTPDistance
+            shortTP := strategy.position_avg_price - minTPDistance
+        
+        if partialTP
+            shortTP1 = strategy.position_avg_price - shortRisk * partialRatio
+            strategy.exit("S-TP1", from_entry="Short", limit=shortTP1, qty_percent=50)
+        
+        if trailEnable
+            trailPts = atrVal * trailMult
+            strategy.exit("S-Exit", from_entry="Short", stop=shortSL, limit=shortTP, trail_points=trailPts)
+        else
+            strategy.exit("S-Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// ============================================================================
+// アラート
+// ============================================================================
+alertcondition(buySignal, "🚀 BUY Signal", "Ultimate Strategy: BUY Signal Generated!")
+alertcondition(sellSignal, "🔻 SELL Signal", "Ultimate Strategy: SELL Signal Generated!")
+alertcondition(sqzReleased and sqzBullish, "💫 Squeeze Released (Bullish)", "Squeeze released with bullish momentum")
+alertcondition(sqzReleased and sqzBearish, "💫 Squeeze Released (Bearish)", "Squeeze released with bearish momentum")
+
+// ============================================================================
+// 情報パネル
+// ============================================================================
+var table infoTable = table.new(position.top_right, 2, 8, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Level 1", text_color=color.white, bgcolor=level1_buy or level1_sell ? color.green : color.gray)
+    table.cell(infoTable, 1, 0, level1_buy ? "BUY" : level1_sell ? "SELL" : "-", text_color=color.white)
+    
+    table.cell(infoTable, 0, 1, "Level 2", text_color=color.white, bgcolor=level2_buy or level2_sell ? color.green : color.gray)
+    table.cell(infoTable, 1, 1, str.tostring(level1_buy ? smcBuyCount : smcSellCount) + "/2", text_color=color.white)
+    
+    table.cell(infoTable, 0, 2, "Level 3", text_color=color.white, bgcolor=level3_buy or level3_sell ? color.green : color.gray)
+    table.cell(infoTable, 1, 2, level3_buy ? "BUY" : level3_sell ? "SELL" : "-", text_color=color.white)
+    
+    table.cell(infoTable, 0, 3, "Squeeze", text_color=color.white, bgcolor=sqzOn ? color.black : color.gray)
+    table.cell(infoTable, 1, 3, sqzOn ? "ON" : "OFF", text_color=color.white)
+    
+    table.cell(infoTable, 0, 4, "Trend", text_color=color.white, bgcolor=color.blue)
+    table.cell(infoTable, 1, 4, longTrend ? "↑" : shortTrend ? "↓" : "-", text_color=color.white)
+    
+    table.cell(infoTable, 0, 5, "Zone", text_color=color.white, bgcolor=color.purple)
+    table.cell(infoTable, 1, 5, inPremiumZone ? "Premium" : inDiscountZone ? "Discount" : "Neutral", text_color=color.white)
+    
+    table.cell(infoTable, 0, 6, "OB", text_color=color.white, bgcolor=color.orange)
+    table.cell(infoTable, 1, 6, inBullishOB ? "Bull" : inBearishOB ? "Bear" : "-", text_color=color.white)
+    
+    table.cell(infoTable, 0, 7, "Signal", text_color=color.white, bgcolor=buySignal ? color.lime : sellSignal ? color.red : color.gray, text_size=size.large)
+    table.cell(infoTable, 1, 7, buySignal ? "🚀 BUY" : sellSignal ? "🔻 SELL" : "待機", text_color=color.white, text_size=size.large)

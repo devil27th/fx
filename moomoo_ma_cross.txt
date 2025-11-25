@@ -1,0 +1,39 @@
+{
+  Moomoo (Futu) デスクトップアプリ用インジケーターコード
+  
+  使用方法:
+  1. Moomooデスクトップアプリを開く
+  2. チャート画面で右クリック -> インジケーター管理 -> 新規作成
+  3. 以下のパラメータを設定
+     - M_TYPE: 最小0, 最大3, デフォルト1 (意味: 0=SMA, 1=EMA, 2=WMA, 3=VWMA)
+     - SHORT_LEN: 最小1, 最大1000, デフォルト20
+     - LONG_LEN: 最小1, 最大1000, デフォルト50
+  4. 以下のコードを貼り付け
+}
+
+{MAの計算}
+SHORT_MA_VAL := IF(M_TYPE=0, MA(CLOSE, SHORT_LEN),
+                IF(M_TYPE=1, EMA(CLOSE, SHORT_LEN),
+                IF(M_TYPE=2, WMA(CLOSE, SHORT_LEN),
+                SUM(CLOSE*VOL, SHORT_LEN)/SUM(VOL, SHORT_LEN)
+                )));
+
+LONG_MA_VAL :=  IF(M_TYPE=0, MA(CLOSE, LONG_LEN),
+                IF(M_TYPE=1, EMA(CLOSE, LONG_LEN),
+                IF(M_TYPE=2, WMA(CLOSE, LONG_LEN),
+                SUM(CLOSE*VOL, LONG_LEN)/SUM(VOL, LONG_LEN)
+                )));
+
+{ラインの描画}
+SHORT_LINE: SHORT_MA_VAL, COLORBLUE;
+LONG_LINE: LONG_MA_VAL, COLORRED;
+
+{クロスの判定}
+GC := CROSS(SHORT_MA_VAL, LONG_MA_VAL);
+DC := CROSS(LONG_MA_VAL, SHORT_MA_VAL);
+
+{矢印の描画}
+{DRAWICONの最後の引数はアイコンIDです。環境に合わせて調整してください}
+{一般的に 1:赤矢印(上昇), 2:緑矢印(下降) などの場合があります}
+DRAWICON(GC, LONG_MA_VAL*0.99, 1);
+DRAWICON(DC, LONG_MA_VAL*1.01, 2);

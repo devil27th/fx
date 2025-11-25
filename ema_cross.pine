@@ -1,0 +1,40 @@
+//@version=5
+indicator("MA Cross Strategy", overlay=true)
+
+// MAタイプの選択
+maType = input.string("EMA", "MA Type", options=["SMA", "EMA", "WMA", "VWMA"])
+length1 = input.int(20, "Short MA Length", minval=1)
+length2 = input.int(50, "Long MA Length", minval=1)
+
+// MA計算関数
+getMA(src, length, type) =>
+    float ma = na
+    if type == "SMA"
+        ma := ta.sma(src, length)
+    else if type == "EMA"
+        ma := ta.ema(src, length)
+    else if type == "WMA"
+        ma := ta.wma(src, length)
+    else
+        ma := ta.vwma(src, length)
+    ma
+
+// MAの計算
+ma20 = getMA(close, length1, maType)
+ma50 = getMA(close, length2, maType)
+
+// MAをチャートに表示
+plot(ma20, color=color.blue, linewidth=2, title="Short MA")
+plot(ma50, color=color.red, linewidth=2, title="Long MA")
+
+// クロスの検出
+goldenCross = ta.crossover(ma20, ma50)  // ゴールデンクロス（短期MAが長期MAを上抜け）
+deathCross = ta.crossunder(ma20, ma50)  // デッドクロス（短期MAが長期MAを下抜け）
+
+// 矢印の表示
+plotshape(goldenCross, title="Golden Cross", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal, text="GC")
+plotshape(deathCross, title="Death Cross", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal, text="DC")
+
+// アラート条件
+alertcondition(goldenCross, title="Golden Cross Alert", message="短期MAが長期MAをゴールデンクロスしました")
+alertcondition(deathCross, title="Death Cross Alert", message="短期MAが長期MAをデッドクロスしました")

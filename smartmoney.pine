@@ -134,20 +134,6 @@ equilibriumZoneColorInput       = input.color(  GRAY,       'Equilibrium Zone', 
 discountZoneColorInput          = input.color(  GREEN,      'Discount Zone',            group = ZONES_GROUP)
 
 //---------------------------------------------------------------------------------------------------------------------}
-// Trendlines with Breaks: Inputs (統合 from break.pine)
-//---------------------------------------------------------------------------------------------------------------------{
-TRENDLINES_GROUP                = 'Trendlines with Breaks'
-
-tl_length                       = input.int(    14,         'Swing Detection Lookback', group = TRENDLINES_GROUP)
-tl_mult                         = input.float(  1.0,        'Slope',                    group = TRENDLINES_GROUP, minval = 0, step = 0.1)
-tl_calcMethod                   = input.string( 'Atr',      'Slope Calculation Method', group = TRENDLINES_GROUP, options = ['Atr','Stdev','Linreg'])
-tl_backpaint                    = input.bool(   true,       'Backpainting',             group = TRENDLINES_GROUP, tooltip = 'Backpainting offset displayed elements in the past. Disable backpainting to see real time information returned by the indicator.')
-
-tl_upCss                        = input.color(  color.teal, 'Up Trendline Color',       group = TRENDLINES_GROUP)
-tl_dnCss                        = input.color(  color.red,  'Down Trendline Color',     group = TRENDLINES_GROUP)
-tl_showExt                      = input.bool(   true,       'Show Extended Lines',      group = TRENDLINES_GROUP)
-
-//---------------------------------------------------------------------------------------------------------------------}
 //DATA STRUCTURES & VARIABLES
 //---------------------------------------------------------------------------------------------------------------------{
 // @type                            UDT representing alerts as bool fields
@@ -834,80 +820,6 @@ if barstate.islastconfirmedhistory or (barstate.isrealtime and newBar)
 
     if showMonthlyLevelsInput and not higherTimeframe('M')
         drawLevels('M',timeframe.ismonthly,monthlyLevelsStyleInput,monthlyLevelsColorInput)
-
-//---------------------------------------------------------------------------------------------------------------------}
-// Trendlines with Breaks: Calculations & Plots (統合 from break.pine)
-//---------------------------------------------------------------------------------------------------------------------{
-var float tl_upper    = 0.0
-var float tl_lower    = 0.0
-var float tl_slope_ph = 0.0
-var float tl_slope_pl = 0.0
-
-var int tl_offset = tl_backpaint ? tl_length : 0
-
-tl_n   = bar_index
-tl_src = close
-
-tl_ph = ta.pivothigh(tl_length, tl_length)
-tl_pl = ta.pivotlow(tl_length, tl_length)
-
-// Slope Calculation Method
-tl_slope = tl_calcMethod == 'Atr' ? ta.atr(tl_length) / tl_length * tl_mult : tl_calcMethod == 'Stdev' ? ta.stdev(tl_src, tl_length) / tl_length * tl_mult : math.abs(ta.sma(tl_src * tl_n, tl_length) - ta.sma(tl_src, tl_length) * ta.sma(tl_n, tl_length)) / ta.variance(tl_n, tl_length) / 2 * tl_mult
-
-// Get slopes and calculate trendlines
-tl_slope_ph := tl_ph ? tl_slope : tl_slope_ph
-tl_slope_pl := tl_pl ? tl_slope : tl_slope_pl
-
-tl_upper := tl_ph ? tl_ph : tl_upper - tl_slope_ph
-tl_lower := tl_pl ? tl_pl : tl_lower + tl_slope_pl
-
-var int tl_upos = 0
-var int tl_dnos = 0
-tl_upos := tl_ph ? 0 : close > tl_upper - tl_slope_ph * tl_length ? 1 : tl_upos
-tl_dnos := tl_pl ? 0 : close < tl_lower + tl_slope_pl * tl_length ? 1 : tl_dnos
-
-// Extended Lines
-var line tl_uptl = line.new(na,na,na,na, color = tl_upCss, style = line.style_dashed, extend = extend.right)
-var line tl_dntl = line.new(na,na,na,na, color = tl_dnCss, style = line.style_dashed, extend = extend.right)
-
-if tl_ph and tl_showExt
-    tl_uptl.set_xy1(tl_n - tl_offset, tl_backpaint ? tl_ph : tl_upper - tl_slope_ph * tl_length)
-    tl_uptl.set_xy2(tl_n - tl_offset + 1, tl_backpaint ? tl_ph - tl_slope : tl_upper - tl_slope_ph * (tl_length + 1))
-
-if tl_pl and tl_showExt
-    tl_dntl.set_xy1(tl_n - tl_offset, tl_backpaint ? tl_pl : tl_lower + tl_slope_pl * tl_length)
-    tl_dntl.set_xy2(tl_n - tl_offset + 1, tl_backpaint ? tl_pl + tl_slope : tl_lower + tl_slope_pl * (tl_length + 1))
-
-// Plots
-plot(tl_backpaint ? tl_upper : tl_upper - tl_slope_ph * tl_length, 'TL Upper', color = tl_ph ? na : tl_upCss, offset = -tl_offset)
-plot(tl_backpaint ? tl_lower : tl_lower + tl_slope_pl * tl_length, 'TL Lower', color = tl_pl ? na : tl_dnCss, offset = -tl_offset)
-
-// Breakouts (BUY/SELL signals)
-plotshape(
-     tl_upos > tl_upos[1] ? low : na
-   , 'BUY Signal (Trendline)'
-   , shape.labelup
-   , location.absolute
-   , tl_upCss
-   , text = 'BUY'
-   , textcolor = color.white
-   , size = size.tiny)
-
-plotshape(
-     tl_dnos > tl_dnos[1] ? high : na
-   , 'SELL Signal (Trendline)'
-   , shape.labeldown
-   , location.absolute
-   , tl_dnCss
-   , text = 'SELL'
-   , textcolor = color.white
-   , size = size.tiny)
-
-// Alerts
-alertcondition(tl_upos > tl_upos[1], 'Upward Breakout (Trendline)', 'Price broke the down-trendline upward')
-alertcondition(tl_dnos > tl_dnos[1], 'Downward Breakout (Trendline)', 'Price broke the up-trendline downward')
-alertcondition(tl_upos > tl_upos[1], 'BUY (Trendline)', 'BUY (Trendline)')
-alertcondition(tl_dnos > tl_dnos[1], 'SELL (Trendline)', 'SELL (Trendline)')
 
 //---------------------------------------------------------------------------------------------------------------------}
 //ALERTS

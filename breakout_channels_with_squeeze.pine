@@ -52,12 +52,22 @@ strictSqz      = input.bool(true, "Strict Squeeze Confirmation (rising/ falling)
 useATRStops      = input.bool(true,  "Use ATR-based Stops/Targets", group="Risk & Exits")
 atrLen           = input.int(14,     "ATR Length", group="Risk & Exits")
 atrSLMult        = input.float(1.5,  "ATR Stop Multiplier", step=0.1, group="Risk & Exits")
-atrTPMult        = input.float(2.5,  "ATR Take Profit Multiplier", step=0.1, group="Risk & Exits")
+atrTPMult        = input.float(4.0,  "ATR Take Profit Multiplier", minval=1.0, step=0.5, group="Risk & Exits", tooltip="推奨: 3.0~5.0（大きいほど利確幅が広がる）")
+
+useRRRatio       = input.bool(true,  "リスクリワード比使用", group="Risk & Exits")
+rrRatio          = input.float(3.0,  "リスク:リワード比", minval=1.0, step=0.5, group="Risk & Exits", tooltip="1リスクに対する利益倍率（例: 3.0 = 1:3）")
+
+minTPPips        = input.float(20.0, "最小利確PIPS", minval=5.0, step=5.0, group="Risk & Exits", tooltip="利確幅の最低保証（PIPS換算）")
+
 trailEnable      = input.bool(true,  "Enable ATR Trailing Stop", group="Risk & Exits")
-trailMult        = input.float(1.5,  "ATR Trailing Multiplier", step=0.1, group="Risk & Exits")
+trailMult        = input.float(2.0,  "ATR Trailing Multiplier", step=0.5, group="Risk & Exits", tooltip="利益が出たらATRの何倍で追尾するか")
+
 breakevenEnable  = input.bool(true,  "Break-even after R multiple", group="Risk & Exits")
 breakevenRR      = input.float(1.0,  "Break-even at R multiple", minval=0.1, step=0.1, group="Risk & Exits")
-partialTPEnable  = input.bool(true,  "Partial Take Profit 50% at 1R", group="Risk & Exits")
+
+partialTPEnable  = input.bool(true,  "Partial Take Profit 50% at 1.5R", group="Risk & Exits")
+partialRatio     = input.float(1.5,  "部分利確R倍率", minval=0.5, step=0.5, group="Risk & Exits", tooltip="部分利確の発動タイミング（1R=SL幅）")
+
 cooldownBars     = input.int(0,      "Cooldown bars after entry", minval=0, group="Risk & Exits")
 
 // ============================================================================
@@ -431,22 +441,34 @@ if enableBacktest
     // Exits (TP/SL)
     // Base stops/targets
     float longStopBase  = useATRStops ? strategy.position_avg_price - atrSLMult * atrVal : strategy.position_avg_price * (1 - slPercent/100)
-    float longLimitBase = useATRStops ? strategy.position_avg_price + atrTPMult * atrVal : strategy.position_avg_price * (1 + tpPercent/100)
     float shortStopBase = useATRStops ? strategy.position_avg_price + atrSLMult * atrVal : strategy.position_avg_price * (1 + slPercent/100)
-    float shortLimitBase= useATRStops ? strategy.position_avg_price - atrTPMult * atrVal : strategy.position_avg_price * (1 - tpPercent/100)
-
-    // Break-even adjustment
+    
+    // Calculate risk
     float longRisk  = strategy.position_avg_price - longStopBase
     float shortRisk = shortStopBase - strategy.position_avg_price
+    
+    // リスクリワード比を使用するか、ATR倍率を使用するか
+    float longLimitBase = useRRRatio ? strategy.position_avg_price + longRisk * rrRatio : (useATRStops ? strategy.position_avg_price + atrTPMult * atrVal : strategy.position_avg_price * (1 + tpPercent/100))
+    float shortLimitBase = useRRRatio ? strategy.position_avg_price - shortRisk * rrRatio : (useATRStops ? strategy.position_avg_price - atrTPMult * atrVal : strategy.position_avg_price * (1 - tpPercent/100))
+    
+    // 最小PIPS保証
+    float pipSize = syminfo.mintick * 10
+    float minTPDistance = minTPPips * pipSize
+    if strategy.position_size > 0 and longLimitBase - strategy.position_avg_price < minTPDistance
+        longLimitBase := strategy.position_avg_price + minTPDistance
+    if strategy.position_size < 0 and strategy.position_avg_price - shortLimitBase < minTPDistance
+        shortLimitBase := strategy.position_avg_price - minTPDistance
+
+    // Break-even adjustment
     float longStop  = breakevenEnable and strategy.position_size > 0  and (close - strategy.position_avg_price >= breakevenRR * longRisk)  ? math.max(longStopBase, strategy.position_avg_price) : longStopBase
     float shortStop = breakevenEnable and strategy.position_size < 0  and (strategy.position_avg_price - close >= breakevenRR * shortRisk) ? math.min(shortStopBase, strategy.position_avg_price) : shortStopBase
 
-    // Partial take profit at 1R (50%)
+    // Partial take profit at partialRatio (50%)
     if partialTPEnable and strategy.position_size > 0 and longRisk > 0
-        float tp1L = strategy.position_avg_price + longRisk
+        float tp1L = strategy.position_avg_price + longRisk * partialRatio
         strategy.exit("L-TP1", from_entry="L-Entry", limit=tp1L, qty_percent=50)
     if partialTPEnable and strategy.position_size < 0 and shortRisk > 0
-        float tp1S = strategy.position_avg_price - shortRisk
+        float tp1S = strategy.position_avg_price - shortRisk * partialRatio
         strategy.exit("S-TP1", from_entry="S-Entry", limit=tp1S, qty_percent=50)
 
     // Main exits with optional ATR trailing
