@@ -1,0 +1,425 @@
+//@version=5
+strategy("USDJPY 1H Pro v4", overlay=true, initial_capital=1000000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.cash_per_order, commission_value=0, slippage=5, currency=currency.JPY, process_orders_on_close=false, calc_on_every_tick=false, pyramiding=0, max_labels_count=500, max_lines_count=100)
+
+// ══════════════════════════════════════════════════════════════════
+//  USDJPY 1時間足 プロストラテジー v4 (検証機能付き)
+//
+//  v4の新機能・改善点:
+//   ① strategy() によるフル自動バックテスト
+//      → TradingViewの「ストラテジーテスター」タブで
+//        損益曲線・勝率・PF・最大DD・全トレード一覧を確認可能
+//   ② ATRベースの SL/TP を strategy.exit() で自動管理
+//   ③ トレーリングストップ対応 (含み益を守る)
+//   ④ セッション時間フィルター (低流動性帯を回避)
+//   ⑤ クールダウン機能 (連続ダマシ回避)
+//   ⑥ 押し目/戻り売りも実際のエントリーとして検証可能
+//   ⑦ MACDヒストグラム方向フィルター (勢い確認)
+//   ⑧ セッション終了時の自動決済オプション
+//   ⑨ チャート上にパフォーマンスダッシュボード表示
+//
+//  ※ バックテスト結果は「ストラテジーテスター」タブ(チャート下部)で
+//    詳細確認できます。ポジションサイズ・手数料はストラテジー設定で調整可能。
+//  ※ slippage=5 (≒0.5pips) でスプレッドコストを近似しています。
+// ══════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────
+// 【設定】EMA
+// ─────────────────────────────────────────
+g_ema        = "EMA設定"
+ema_fast_len = input.int(21,  "短期EMA",  minval=1, group=g_ema)
+ema_mid_len  = input.int(50,  "中期EMA",  minval=1, group=g_ema)
+ema_slow_len = input.int(200, "長期EMA",  minval=1, group=g_ema)
+ema200_slope = input.int(5,   "EMA200傾き確認バー数", minval=1, maxval=20, group=g_ema)
+show_ema     = input.bool(true, "EMAラインを表示", group=g_ema)
+
+// ─────────────────────────────────────────
+// 【設定】Supertrend
+// ─────────────────────────────────────────
+g_st      = "Supertrend設定"
+st_factor = input.float(3.0, "Factor",     minval=1.0, step=0.5, group=g_st)
+st_period = input.int(10,   "ATR期間",     minval=1,             group=g_st)
+show_st   = input.bool(true, "ラインを表示", group=g_st)
+
+// ─────────────────────────────────────────
+// 【設定】ADX
+// ─────────────────────────────────────────
+g_adx      = "ADX設定 (トレンド強度)"
+adx_len    = input.int(14, "ADX期間",   minval=1,             group=g_adx)
+adx_thresh = input.int(20, "ADX最小値", minval=10, maxval=50, group=g_adx)
+
+// ─────────────────────────────────────────
+// 【設定】RSI
+// ─────────────────────────────────────────
+g_rsi   = "RSI設定"
+rsi_len = input.int(14, "RSI期間",       minval=1,  group=g_rsi)
+rsi_ob  = input.int(70, "買われすぎ水準", minval=51, group=g_rsi)
+rsi_os  = input.int(30, "売られすぎ水準", maxval=49, group=g_rsi)
+
+// ─────────────────────────────────────────
+// 【設定】MACD
+// ─────────────────────────────────────────
+g_macd          = "MACD設定"
+macd_fast_len   = input.int(12, "Fast",   minval=1, group=g_macd)
+macd_slow_len   = input.int(26, "Slow",   minval=1, group=g_macd)
+macd_signal_len = input.int(9,  "Signal", minval=1, group=g_macd)
+
+// ─────────────────────────────────────────
+// 【設定】リスク管理 (SL/TP)
+// ─────────────────────────────────────────
+g_risk    = "リスク管理 (ATRベース SL/TP)"
+atr_len   = input.int(14,    "ATR期間", minval=1,   group=g_risk)
+sl_mult   = input.float(1.5, "SL倍率", minval=0.5, step=0.1, group=g_risk)
+tp_mult   = input.float(3.0, "TP倍率", minval=0.5, step=0.1, group=g_risk)
+
+// ─────────────────────────────────────────
+// 【設定】トレーリングストップ (v4新機能)
+// ─────────────────────────────────────────
+g_trail = "トレーリングストップ (v4)"
+use_trailing   = input.bool(false, "トレーリングストップを使用", group=g_trail,
+                  tooltip="含み益が一定以上出たら、ストップを引き上げて利益を保護します。")
+trail_trigger  = input.float(1.5, "開始条件 (ATR倍率)", minval=0.5, step=0.1, group=g_trail,
+                  tooltip="この倍率分の含み益が出たらトレーリング開始")
+trail_offset_v = input.float(1.0, "追従幅 (ATR倍率)",   minval=0.1, step=0.1, group=g_trail,
+                  tooltip="最高値/最安値からこの幅でストップが追従")
+
+// ─────────────────────────────────────────
+// 【設定】フィルターON/OFF
+// ─────────────────────────────────────────
+g_filter = "フィルターON/OFF設定"
+use_ema_trend     = input.bool(true,  "EMA200トレンドフィルター",       group=g_filter)
+use_adx_filter    = input.bool(false, "ADXレンジ回避フィルター",         group=g_filter,
+                     tooltip="ADXが閾値以上の時のみエントリー。")
+use_adx_slope     = input.bool(true,  "ADX上昇中のみエントリー",         group=g_filter,
+                     tooltip="トレンドの勢いが増している時だけエントリー。")
+use_st_filter     = input.bool(false, "Supertrendフィルター",            group=g_filter)
+use_candle_filter = input.bool(false, "強いローソク足フィルター",          group=g_filter)
+use_deviation     = input.bool(true,  "乖離率フィルター (飛び乗り防止)", group=g_filter)
+max_dev_atr       = input.float(2.0,  "許容乖離幅 (ATR倍率)", minval=0.5, step=0.1, group=g_filter)
+use_macd_dir      = input.bool(false, "MACDヒストグラム方向 (v4)",       group=g_filter,
+                     tooltip="ヒストグラムが拡大中か確認。勢いが増している時のみエントリー。")
+
+// ─────────────────────────────────────────
+// 【設定】セッション・クールダウン (v4新機能)
+// ─────────────────────────────────────────
+g_session = "セッション・クールダウン (v4)"
+use_session       = input.bool(false, "取引時間を制限",                  group=g_session,
+                     tooltip="指定した時間帯のみエントリーします。")
+session_str       = input.session("0100-1500", "取引セッション (UTC)",   group=g_session,
+                     tooltip="USDJPY推奨: 0100-1500 UTC (東京10時〜翌0時)")
+use_session_close = input.bool(false, "セッション外でポジション決済",     group=g_session,
+                     tooltip="セッション終了時に自動でポジションを閉じます。")
+use_cooldown      = input.bool(false, "クールダウン (連続シグナル回避)", group=g_session)
+cooldown_bars     = input.int(5, "クールダウン期間 (バー数)", minval=1, maxval=50, group=g_session)
+use_bounce        = input.bool(true,  "押し目/戻り売りもエントリー",     group=g_session,
+                     tooltip="RSI押し目/戻りシグナルでも実際にポジションを取ります。")
+
+// ─────────────────────────────────────────
+// 【設定】バックテスト期間 (v4新機能)
+// ─────────────────────────────────────────
+g_bt = "バックテスト期間"
+use_bt_period = input.bool(false, "期間を制限", group=g_bt)
+bt_start      = input.time(timestamp("2024-01-01"), "開始日", group=g_bt)
+bt_end        = input.time(timestamp("2026-12-31"), "終了日", group=g_bt)
+
+// ─────────────────────────────────────────
+// 【設定】表示
+// ─────────────────────────────────────────
+g_disp     = "表示設定"
+show_bg    = input.bool(true, "トレンド背景色", group=g_disp)
+show_table = input.bool(true, "ダッシュボード", group=g_disp)
+show_label = input.bool(true, "売買ラベル",     group=g_disp)
+
+// ══════════════════════════════════════════════════════════════════
+// インジケーター計算
+// ══════════════════════════════════════════════════════════════════
+ema21   = ta.ema(close, ema_fast_len)
+ema50   = ta.ema(close, ema_mid_len)
+ema200  = ta.ema(close, ema_slow_len)
+rsi_val = ta.rsi(close, rsi_len)
+atr_val = ta.atr(atr_len)
+
+[macd_line, signal_line, macd_hist] = ta.macd(close, macd_fast_len, macd_slow_len, macd_signal_len)
+[supertrend, st_dir]                = ta.supertrend(st_factor, st_period)
+[di_plus, di_minus, adx_val]        = ta.dmi(adx_len, adx_len)
+
+// ══════════════════════════════════════════════════════════════════
+// シグナル判定ロジック
+// ══════════════════════════════════════════════════════════════════
+
+// ① EMA200の傾き
+ema200_going_up   = ema200 > ema200[ema200_slope]
+ema200_going_down = ema200 < ema200[ema200_slope]
+
+// ② トレンドフィルター
+in_uptrend   = not use_ema_trend or (close > ema200 and ema200_going_up)
+in_downtrend = not use_ema_trend or (close < ema200 and ema200_going_down)
+
+// ③ ADX強度
+trend_strong = not use_adx_filter or (adx_val >= adx_thresh)
+
+// ④ Supertrend方向
+st_bull = not use_st_filter or (st_dir < 0)
+st_bear = not use_st_filter or (st_dir > 0)
+
+// ⑤ EMAクロス (トリガー)
+golden_cross = ta.crossover(ema21, ema50)
+death_cross  = ta.crossunder(ema21, ema50)
+
+// ⑥ RSI
+rsi_buy_ok  = rsi_val > 45 and rsi_val < rsi_ob
+rsi_sell_ok = rsi_val < 55 and rsi_val > rsi_os
+
+// ⑦ MACD (v4: ヒストグラム方向追加)
+macd_bullish = macd_hist > 0 and (not use_macd_dir or macd_hist > macd_hist[1])
+macd_bearish = macd_hist < 0 and (not use_macd_dir or macd_hist < macd_hist[1])
+
+// ⑧ 強いローソク足
+strong_bull = not use_candle_filter or (close > open and (close - open) > atr_val * 0.2)
+strong_bear = not use_candle_filter or (close < open and (open - close) > atr_val * 0.2)
+
+// ⑨ ADX上昇
+adx_rising = not use_adx_slope or (adx_val > adx_val[1])
+
+// ⑩ 乖離率
+dist_from_ema21    = math.abs(close - ema21)
+is_not_overheated  = not use_deviation or (dist_from_ema21 < atr_val * max_dev_atr)
+
+// ⑪ セッション
+in_session = not use_session or (not na(time(timeframe.period, session_str)))
+
+// ⑫ バックテスト期間
+in_bt_period = not use_bt_period or (time >= bt_start and time <= bt_end)
+
+// ⑬ クールダウン
+bse         = ta.barssince(strategy.position_size != strategy.position_size[1] and strategy.position_size != 0)
+cooldown_ok = not use_cooldown or na(bse) or bse >= cooldown_bars
+
+// ── 最終シグナル
+buy_signal  = in_uptrend   and trend_strong and golden_cross and st_bull and rsi_buy_ok  and macd_bullish and strong_bull and adx_rising and is_not_overheated
+sell_signal = in_downtrend and trend_strong and death_cross  and st_bear and rsi_sell_ok and macd_bearish and strong_bear and adx_rising and is_not_overheated
+
+// ── 押し目 / 戻り売り
+rsi_bounce_buy  = in_uptrend   and trend_strong and st_bull and ta.crossover(rsi_val, 40) and ema21 > ema50 and macd_bullish
+rsi_bounce_sell = in_downtrend and trend_strong and st_bear and ta.crossunder(rsi_val, 60) and ema21 < ema50 and macd_bearish
+
+// ── 総合トレード許可
+can_trade = in_bt_period and in_session and cooldown_ok
+
+// ══════════════════════════════════════════════════════════════════
+// ストラテジー実行
+// ══════════════════════════════════════════════════════════════════
+var float long_sl   = na
+var float long_tp   = na
+var float short_sl  = na
+var float short_tp  = na
+var float entry_atr = na
+
+// ── メインエントリー
+if buy_signal and can_trade
+    entry_atr := atr_val
+    long_sl   := close - atr_val * sl_mult
+    long_tp   := close + atr_val * tp_mult
+    strategy.entry("Long", strategy.long,
+         alert_message="[USDJPY v4] BUY エントリー! Price=" + str.tostring(close))
+
+if sell_signal and can_trade
+    entry_atr := atr_val
+    short_sl  := close + atr_val * sl_mult
+    short_tp  := close - atr_val * tp_mult
+    strategy.entry("Short", strategy.short,
+         alert_message="[USDJPY v4] SELL エントリー! Price=" + str.tostring(close))
+
+// ── 押し目/戻り売りエントリー
+if use_bounce and can_trade and strategy.position_size == 0
+    if rsi_bounce_buy and not buy_signal
+        entry_atr := atr_val
+        long_sl   := close - atr_val * sl_mult
+        long_tp   := close + atr_val * tp_mult
+        strategy.entry("Long (押目)", strategy.long,
+             alert_message="[USDJPY v4] 押し目買いエントリー!")
+    if rsi_bounce_sell and not sell_signal
+        entry_atr := atr_val
+        short_sl  := close + atr_val * sl_mult
+        short_tp  := close - atr_val * tp_mult
+        strategy.entry("Short (戻り)", strategy.short,
+             alert_message="[USDJPY v4] 戻り売りエントリー!")
+
+// ── SL/TP/トレーリング発注
+if strategy.position_size > 0 and not na(long_sl)
+    t_pts = use_trailing ? math.round(nz(entry_atr, atr_val) * trail_trigger / syminfo.mintick) : na
+    t_off = use_trailing ? math.round(nz(entry_atr, atr_val) * trail_offset_v / syminfo.mintick) : na
+    if use_trailing
+        strategy.exit("Exit Long",   "Long",       stop=long_sl, limit=long_tp, trail_points=t_pts, trail_offset=t_off,
+             alert_message="[USDJPY v4] Long決済")
+        strategy.exit("Exit Long B", "Long (押目)", stop=long_sl, limit=long_tp, trail_points=t_pts, trail_offset=t_off,
+             alert_message="[USDJPY v4] 押目Long決済")
+    else
+        strategy.exit("Exit Long",   "Long",       stop=long_sl, limit=long_tp,
+             alert_message="[USDJPY v4] Long決済")
+        strategy.exit("Exit Long B", "Long (押目)", stop=long_sl, limit=long_tp,
+             alert_message="[USDJPY v4] 押目Long決済")
+
+if strategy.position_size < 0 and not na(short_sl)
+    t_pts = use_trailing ? math.round(nz(entry_atr, atr_val) * trail_trigger / syminfo.mintick) : na
+    t_off = use_trailing ? math.round(nz(entry_atr, atr_val) * trail_offset_v / syminfo.mintick) : na
+    if use_trailing
+        strategy.exit("Exit Short",   "Short",       stop=short_sl, limit=short_tp, trail_points=t_pts, trail_offset=t_off,
+             alert_message="[USDJPY v4] Short決済")
+        strategy.exit("Exit Short B", "Short (戻り)", stop=short_sl, limit=short_tp, trail_points=t_pts, trail_offset=t_off,
+             alert_message="[USDJPY v4] 戻りShort決済")
+    else
+        strategy.exit("Exit Short",   "Short",       stop=short_sl, limit=short_tp,
+             alert_message="[USDJPY v4] Short決済")
+        strategy.exit("Exit Short B", "Short (戻り)", stop=short_sl, limit=short_tp,
+             alert_message="[USDJPY v4] 戻りShort決済")
+
+// ── セッション終了時決済
+session_ended = use_session and use_session_close and in_session[1] and not in_session
+if session_ended and strategy.position_size != 0
+    strategy.close_all("セッション終了",
+         alert_message="[USDJPY v4] セッション終了により全決済")
+
+// ══════════════════════════════════════════════════════════════════
+// プロット
+// ══════════════════════════════════════════════════════════════════
+plot(show_ema ? ema200 : na, "EMA200", color=color.new(color.white,  20), linewidth=3)
+plot(show_ema ? ema50  : na, "EMA50",  color=color.new(color.orange, 10), linewidth=2)
+plot(show_ema ? ema21  : na, "EMA21",  color=color.new(color.yellow, 10), linewidth=1)
+
+p_ema21 = plot(show_ema ? ema21 : na, display=display.none)
+p_ema50 = plot(show_ema ? ema50 : na, display=display.none)
+fill(p_ema21, p_ema50, color=ema21 > ema50 ? color.new(color.green, 85) : color.new(color.red, 85), title="EMA帯域")
+
+st_color = st_dir < 0 ? color.new(color.aqua, 20) : color.new(color.fuchsia, 20)
+plot(show_st ? supertrend : na, "Supertrend", color=st_color, linewidth=2, style=plot.style_stepline)
+
+bgcolor(show_bg and in_uptrend   ? color.new(color.teal,   93) : na, title="上昇トレンド背景")
+bgcolor(show_bg and in_downtrend ? color.new(color.maroon, 90) : na, title="下降トレンド背景")
+bgcolor(not trend_strong ? color.new(color.yellow, 97) : na, title="レンジ警告")
+bgcolor(use_session and not in_session ? color.new(color.gray, 95) : na, title="セッション外")
+
+// ══════════════════════════════════════════════════════════════════
+// 売買ラベル
+// ══════════════════════════════════════════════════════════════════
+if show_label
+    if buy_signal and can_trade
+        rr = math.round(tp_mult / sl_mult, 1)
+        lbl_txt = "B (v4)\nSL: " + str.tostring(math.round(long_sl, 3)) + "\nTP: " + str.tostring(math.round(long_tp, 3)) + "\nR:R 1:" + str.tostring(rr)
+        label.new(bar_index, low - atr_val * 2.0, text=lbl_txt, color=color.new(color.green, 5), textcolor=color.white, style=label.style_label_up, size=size.normal)
+    if sell_signal and can_trade
+        rr = math.round(tp_mult / sl_mult, 1)
+        lbl_txt = "S (v4)\nSL: " + str.tostring(math.round(short_sl, 3)) + "\nTP: " + str.tostring(math.round(short_tp, 3)) + "\nR:R 1:" + str.tostring(rr)
+        label.new(bar_index, high + atr_val * 2.0, text=lbl_txt, color=color.new(color.red, 5), textcolor=color.white, style=label.style_label_down, size=size.normal)
+    if use_bounce and rsi_bounce_buy and not buy_signal and can_trade and strategy.position_size == 0
+        label.new(bar_index, low - atr_val * 1.5, text="押目買い", color=color.new(color.lime, 20), textcolor=color.black, style=label.style_label_up, size=size.small)
+    if use_bounce and rsi_bounce_sell and not sell_signal and can_trade and strategy.position_size == 0
+        label.new(bar_index, high + atr_val * 1.5, text="戻り売り", color=color.new(color.fuchsia, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+plotshape(buy_signal and can_trade,  title="Buy",  text="B", style=shape.labelup,   location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+plotshape(sell_signal and can_trade, title="Sell", text="S", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0),   textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════════════════════
+// パフォーマンスダッシュボード (v4)
+// ══════════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 14,
+     bgcolor=color.new(color.black, 50),
+     border_color=color.new(color.gray, 40), border_width=1,
+     frame_color=color.new(color.gray, 20),  frame_width=1)
+
+if (barstate.islastconfirmedhistory or barstate.islast) and show_table
+    // ── 検証結果セクション
+    total_trades = strategy.closedtrades
+    win_trades   = strategy.wintrades
+    lose_trades  = strategy.losstrades
+    win_rate     = total_trades > 0 ? win_trades / total_trades * 100 : 0.0
+    pf           = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
+    net_pnl      = strategy.netprofit
+    net_pct      = strategy.initial_capital > 0 ? net_pnl / strategy.initial_capital * 100 : 0.0
+    max_dd       = strategy.max_drawdown
+    avg_win      = win_trades > 0 ? strategy.grossprofit / win_trades : 0.0
+    avg_loss     = lose_trades > 0 ? math.abs(strategy.grossloss) / lose_trades : 0.0
+
+    // Row 0: Header
+    table.cell(dash, 0, 0, "YU Pro v4", text_color=color.yellow, bgcolor=color.new(color.navy, 20), text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "検証結果",   text_color=color.yellow, bgcolor=color.new(color.navy, 20), text_size=size.small, text_halign=text.align_center)
+
+    // Row 1: Total trades & Win rate
+    wr_clr = win_rate >= 55 ? color.lime : win_rate >= 45 ? color.orange : color.red
+    table.cell(dash, 0, 1, "取引数/勝率", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(total_trades) + "回  " + str.tostring(math.round(win_rate, 1)) + "%", text_color=wr_clr, text_size=size.small)
+
+    // Row 2: Profit Factor
+    pf_clr = pf >= 1.5 ? color.lime : pf >= 1.0 ? color.orange : color.red
+    table.cell(dash, 0, 2, "プロフィットF", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(math.round(pf, 2)), text_color=pf_clr, text_size=size.small)
+
+    // Row 3: Net P&L
+    pnl_clr = net_pnl > 0 ? color.lime : color.red
+    table.cell(dash, 0, 3, "純損益", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 3, "¥" + str.tostring(math.round(net_pnl, 0)) + " (" + str.tostring(math.round(net_pct, 1)) + "%)", text_color=pnl_clr, text_size=size.small)
+
+    // Row 4: Max Drawdown
+    table.cell(dash, 0, 4, "最大DD", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 4, "¥" + str.tostring(math.round(max_dd, 0)), text_color=color.red, text_size=size.small)
+
+    // Row 5: Avg Win / Avg Loss
+    table.cell(dash, 0, 5, "平均損益", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 5, "W ¥" + str.tostring(math.round(avg_win, 0)) + " / L ¥" + str.tostring(math.round(avg_loss, 0)), text_color=color.white, text_size=size.small)
+
+    // Row 6: Current position
+    pos_txt = strategy.position_size > 0 ? "Long (" + str.tostring(math.round(strategy.position_avg_price, 3)) + ")" : strategy.position_size < 0 ? "Short (" + str.tostring(math.round(strategy.position_avg_price, 3)) + ")" : "ノーポジ"
+    pos_clr = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.fuchsia : color.gray
+    table.cell(dash, 0, 6, "ポジション", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 6, pos_txt, text_color=pos_clr, text_size=size.small)
+
+    // ── 相場状態セクション (separator)
+    table.cell(dash, 0, 7, "── 相場状態 ──", text_color=color.gray, bgcolor=color.new(color.navy, 30), text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 1, 7, "",                text_color=color.gray, bgcolor=color.new(color.navy, 30), text_size=size.small)
+
+    // Row 8: Trend
+    trend_txt = in_uptrend ? "上昇トレンド" : in_downtrend ? "下降トレンド" : "レンジ/不定"
+    trend_clr = in_uptrend ? color.lime : in_downtrend ? color.red : color.gray
+    table.cell(dash, 0, 8, "トレンド", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 8, trend_txt,  text_color=trend_clr,   text_size=size.small)
+
+    // Row 9: ADX
+    adx_txt = trend_strong ? "強 (" + str.tostring(math.round(adx_val, 1)) + ")" : "弱 (" + str.tostring(math.round(adx_val, 1)) + ")"
+    adx_clr = trend_strong ? color.lime : color.orange
+    table.cell(dash, 0, 9, "ADX", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 9, adx_txt, text_color=adx_clr, text_size=size.small)
+
+    // Row 10: RSI
+    rsi_txt = rsi_val > rsi_ob ? "買われすぎ" : rsi_val < rsi_os ? "売られすぎ" : str.tostring(math.round(rsi_val, 1))
+    rsi_clr = rsi_val > rsi_ob ? color.red : rsi_val < rsi_os ? color.lime : color.white
+    table.cell(dash, 0, 10, "RSI", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 10, rsi_txt, text_color=rsi_clr, text_size=size.small)
+
+    // Row 11: EMA order
+    ema_txt = ema21 > ema50 and ema50 > ema200 ? "完全上昇順" : ema21 < ema50 and ema50 < ema200 ? "完全下降順" : "混在"
+    ema_clr = ema21 > ema50 and ema50 > ema200 ? color.lime : ema21 < ema50 and ema50 < ema200 ? color.red : color.orange
+    table.cell(dash, 0, 11, "EMA並び", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 11, ema_txt,   text_color=ema_clr,     text_size=size.small)
+
+    // Row 12: Deviation
+    dev_txt = is_not_overheated ? "適正" : "加熱 ⚠"
+    dev_clr = is_not_overheated ? color.lime : color.red
+    table.cell(dash, 0, 12, "乖離率", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 12, dev_txt,  text_color=dev_clr,      text_size=size.small)
+
+    // Row 13: Signal
+    sig_txt = buy_signal and can_trade ? "BUY!" : sell_signal and can_trade ? "SELL!" : rsi_bounce_buy ? "押目買い" : rsi_bounce_sell ? "戻り売り" : "待機中"
+    sig_clr = buy_signal and can_trade ? color.aqua : sell_signal and can_trade ? color.fuchsia : (rsi_bounce_buy or rsi_bounce_sell) ? color.orange : color.gray
+    table.cell(dash, 0, 13, "シグナル", text_color=color.silver, text_size=size.small)
+    table.cell(dash, 1, 13, sig_txt,    text_color=sig_clr,      text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════
+// アラート (strategy版は alert() を使用)
+// ══════════════════════════════════════════════════════════════════
+if buy_signal and can_trade
+    alert("[USDJPY v4] BUYシグナル発生! Price=" + str.tostring(close), alert.freq_once_per_bar)
+if sell_signal and can_trade
+    alert("[USDJPY v4] SELLシグナル発生! Price=" + str.tostring(close), alert.freq_once_per_bar)
+if rsi_bounce_buy and not buy_signal
+    alert("[USDJPY v4] 押し目買いチャンス! RSIが40を上回りました", alert.freq_once_per_bar)
+if rsi_bounce_sell and not sell_signal
+    alert("[USDJPY v4] 戻り売りチャンス! RSIが60を下回りました", alert.freq_once_per_bar)
