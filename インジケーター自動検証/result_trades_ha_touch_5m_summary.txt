@@ -1,0 +1,13 @@
+=== 集計結果 (result_trades_ha_touch_5m.csv) ===
+Total trades : 4695
+Net PnL      : 87338.89
+Gross Profit : 173800.52
+Gross Loss   : -86461.63
+Profit Factor: 2.01
+Win Rate     : 49.82% (2339/4695)
+Avg Win/Loss : 74.31 / -36.70
+Max Drawdown : 1356.13
+
+--- サイド別 ---
+LONG: trades=2380, net=42698.79, win_rate=49.29%
+SHORT: trades=2315, net=44640.10, win_rate=50.37%

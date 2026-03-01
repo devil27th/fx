@@ -1,0 +1,128 @@
+//@version=5
+strategy("Heikin Ashi MA Touch Strategy v4", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ==============================================================================
+// 平均足 MAタッチ エントリー戦略 (ストラテジー版)
+// ==============================================================================
+// 【前提】
+// チャートを「平均足 (Heikin Ashi)」表示にして使用します。
+//
+// 【ロジック】
+// 1. MA20とMA50の並びを確認 (GC = Long目線, DC = Short目線)
+// 2. トレンド方向に価格が戻り、MAに接触(タッチ)したら準備状態
+// 3. その後、同方向のローソク足（陽線ならロング、陰線ならショート）が確定したらエントリー
+// 4. 利確 (TP): MA20の傾きが反転したとき (上昇→下降でロング利確など)
+// 5. 損切 (SL): Supertrendの方向が反転したとき
+// ==============================================================================
+
+// --- 入力設定 ---
+g_ma = "MA設定"
+ma_fast_len = input.int(20, "短期MA期間", group=g_ma)
+ma_slow_len = input.int(50, "中期MA期間", group=g_ma)
+ma_type     = input.string("SMA", "MAタイプ", options=["SMA", "EMA"], group=g_ma)
+touch_margin_pips = input.float(2.0, "タッチ許容誤差 (pips)", step=0.5, group=g_ma, tooltip="この値(pips)以内までMAに近づけば『タッチした』とみなします。ギリギリ届かない反発を取りこぼさないための設定です。")
+
+g_st = "Supertrend (ロスカット判定用)"
+st_factor = input.float(3.0, "Supertrend Factor", step=0.5, group=g_st)
+st_period = input.int(10,   "Supertrend Period", group=g_st)
+
+// --- インジケーター計算 ---
+ma_fast = ma_type == "SMA" ? ta.sma(close, ma_fast_len) : ta.ema(close, ma_fast_len)
+ma_slow = ma_type == "SMA" ? ta.sma(close, ma_slow_len) : ta.ema(close, ma_slow_len)
+
+[st, st_dir]  = ta.supertrend(st_factor, st_period)
+
+// --- 状態判定 ---
+gc = ma_fast > ma_slow
+dc = ma_fast < ma_slow
+
+// ローソク足判定 (平均足前提)
+bull_candle = close > open
+bear_candle = close < open
+
+// 変数
+var bool touched_ma_long = false
+var bool touched_ma_short = false
+
+// 現在のポジション状態を取得 (1: ロング, -1: ショート, 0: ノーポジション)
+pos = math.sign(strategy.position_size)
+
+// MAタッチ判定
+touch_margin = touch_margin_pips * syminfo.mintick * 10 // Pipsをチャートの価格単位に変換
+
+// GC・DC切り替わりでタッチ状態リセット
+if ta.crossover(ma_fast, ma_slow)
+    touched_ma_long := false
+if ta.crossunder(ma_fast, ma_slow)
+    touched_ma_short := false
+
+// Long用タッチ (GC中、かつポジションがない場合)
+if gc and pos <= 0
+    // 価格(安値)がMAの「許容誤差内」まで近づいたらタッチと判定
+    if low <= (ma_fast + touch_margin) or low <= (ma_slow + touch_margin)
+        touched_ma_long := true
+    
+    // 【追加】オレンジのMA (ma_slow) を下抜けたらエントリー待機を解除
+    if low < ma_slow
+        touched_ma_long := false
+
+// Short用タッチ (DC中、かつポジションがない場合)
+if dc and pos >= 0
+    // 価格(高値)がMAの「許容誤差内」まで近づいたらタッチと判定
+    if high >= (ma_fast - touch_margin) or high >= (ma_slow - touch_margin)
+        touched_ma_short := true
+    
+    // 【追加】オレンジのMA (ma_slow) を上抜けたらエントリー待機を解除
+    if high > ma_slow
+        touched_ma_short := false
+
+// --- エントリー & エグジット判定 ---
+// エントリー基準: タッチ後に順張りの１本(陽線/陰線)が確定
+buy_signal  = pos <= 0 and gc and touched_ma_long  and bull_candle
+sell_signal = pos >= 0 and dc and touched_ma_short and bear_candle
+
+// 傾き判定 (ma_fastが下がり始めた/上がり始めた)
+ma_fast_down = ma_fast < ma_fast[1]
+ma_fast_up   = ma_fast > ma_fast[1]
+
+// エグジットシグナル
+// 同バーでエントリーとエグジットが被らないように `not buy_signal` などを追加して保護
+exit_long_tp = pos == 1 and ma_fast_down and not buy_signal
+exit_long_sl = pos == 1 and st_dir > 0   and not buy_signal // Supertrendが下落(弱気)に反転
+
+exit_short_tp = pos == -1 and ma_fast_up and not sell_signal
+exit_short_sl = pos == -1 and st_dir < 0 and not sell_signal // Supertrendが上昇(強気)に反転
+
+// --- 注文実行と状態更新 ---
+
+// ロング系の処理
+if buy_signal
+    strategy.entry("Long", strategy.long, alert_message="【新規LONG】\n"+syminfo.ticker+"でMAタッチ戦略の買いシグナルが発生しました。")
+    touched_ma_long := false // エントリー完了でタッチ状態をリセット
+else if exit_long_tp
+    strategy.close("Long", comment="TP (MA↓)", alert_message="【LONG利確】\n"+syminfo.ticker+"でMAが下がり始めたため、買いポジションを利確しました。")
+else if exit_long_sl
+    strategy.close("Long", comment="SL (ST反転)", alert_message="【LONG損切】\n"+syminfo.ticker+"でSupertrendが弱気に反転したため、買いポジションを損切りしました。")
+
+// ショート系の処理
+if sell_signal
+    strategy.entry("Short", strategy.short, alert_message="【新規SHORT】\n"+syminfo.ticker+"でMAタッチ戦略の売りシグナルが発生しました。")
+    touched_ma_short := false // エントリー完了でタッチ状態をリセット
+else if exit_short_tp
+    strategy.close("Short", comment="TP (MA↑)", alert_message="【SHORT利確】\n"+syminfo.ticker+"でMAが上がり始めたため、売りポジションを利確しました。")
+else if exit_short_sl
+    strategy.close("Short", comment="SL (ST反転)", alert_message="【SHORT損切】\n"+syminfo.ticker+"でSupertrendが強気に反転したため、売りポジションを損切りしました。")
+
+// --- プロット表示 ---
+// MA
+plot(ma_fast, "MA20", color=color.new(color.yellow, 10), linewidth=2)
+plot(ma_slow, "MA50", color=color.new(color.orange, 10), linewidth=2)
+
+// MABackground
+p_fast = plot(ma_fast, display=display.none)
+p_slow = plot(ma_slow, display=display.none)
+fill(p_fast, p_slow, color=ma_fast > ma_slow ? color.new(color.teal, 80) : color.new(color.maroon, 80))
+
+// Supertrend
+st_color = st_dir < 0 ? color.new(color.aqua, 20) : color.new(color.fuchsia, 20)
+plot(st, "Supertrend", color=st_color, linewidth=2, style=plot.style_stepline)
